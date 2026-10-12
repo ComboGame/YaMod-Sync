@@ -58,8 +58,10 @@ def main() -> None:
 
     notes = ""
     if args.notes and args.notes.exists():
-        lines = [line.strip("-* \t") for line in args.notes.read_text(encoding="utf-8").splitlines()]
-        notes = "; ".join(line for line in lines if line and not line.startswith("#"))
+        # Only the bullet points: the updater card has room for what changed, not
+        # for the installation instructions under it.
+        lines = args.notes.read_text(encoding="utf-8").splitlines()
+        notes = "; ".join(line[2:].strip() for line in lines if line.startswith("- "))
 
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
     latest = {
