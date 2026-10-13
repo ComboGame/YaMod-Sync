@@ -39,6 +39,58 @@ use ymsync_proto::secret_eq;
 
 use crate::cache::{self, Cache};
 
+/// How many tracks [`Hot`] holds: the one playing, the next, and the one before.
+const HOT_TRACKS: usize = 3;
+
+/// Tracks this device holds in memory but not on disk — the one playing, fetched
+/// from Yandex without being kept — offered to the room alongside the cache.
+///
+/// Without it a track was only shareable once it was on disk, which with
+/// auto-caching off meant never: a listener whose account cannot play a track
+/// (no Плюс, another region, a track since withdrawn) heard silence even though
+/// the device beside them was playing it.
+#[derive(Clone, Default)]
+pub struct Hot(Arc<std::sync::Mutex<std::collections::VecDeque<HotTrack>>>);
+
+struct HotTrack {
+    id: String,
+    data: Bytes,
+    digest: String,
+}
+
+impl Hot {
+    /// Holds a track, dropping the oldest beyond [`HOT_TRACKS`].
+    pub fn put(&self, id: &str, data: Bytes) {
+        if data.is_empty() {
+            return;
+        }
+        let digest = cache::digest_of(&data);
+        let mut tracks = self.0.lock().expect("hot tracks");
+        tracks.retain(|track| track.id != id);
+        tracks.push_back(HotTrack {
+            id: id.to_string(),
+            data,
+            digest,
+        });
+        while tracks.len() > HOT_TRACKS {
+            tracks.pop_front();
+        }
+    }
+
+    pub fn get(&self, id: &str) -> Option<(Bytes, String)> {
+        let tracks = self.0.lock().expect("hot tracks");
+        tracks
+            .iter()
+            .find(|track| track.id == id)
+            .map(|track| (track.data.clone(), track.digest.clone()))
+    }
+
+    pub fn ids(&self) -> Vec<String> {
+        let tracks = self.0.lock().expect("hot tracks");
+        tracks.iter().map(|track| track.id.clone()).collect()
+    }
+}
+
 /// Carries the room's shared secret.
 const TOKEN_HEADER: &str = "x-room-token";
 /// Carries the MD5 of the body, so a receiver can tell the bytes arrived whole.
@@ -108,6 +160,16 @@ impl Drop for Server {
 /// the network. Port 0 asks the OS for a free one, which [`Server::port`] then
 /// reports — that is what gets announced to the room.
 pub async fn serve(cache: Arc<Cache>, token: impl Into<String>, port: u16) -> Result<Server> {
+    serve_with(cache, Hot::default(), token, port).await
+}
+
+/// [`serve`], also offering what `hot` holds in memory.
+pub async fn serve_with(
+    cache: Arc<Cache>,
+    hot: Hot,
+    token: impl Into<String>,
+    port: u16,
+) -> Result<Server> {
     let token = token.into();
     if token.trim().is_empty() {
         bail!("нельзя раздавать треки без токена комнаты: его проверяет каждый запрос");
@@ -125,6 +187,7 @@ pub async fn serve(cache: Arc<Cache>, token: impl Into<String>, port: u16) -> Re
     let task = tokio::spawn(accept_loop(
         listener,
         cache,
+        hot,
         Arc::new(token),
         shutdown_rx,
     ));
@@ -139,6 +202,7 @@ pub async fn serve(cache: Arc<Cache>, token: impl Into<String>, port: u16) -> Re
 async fn accept_loop(
     listener: TcpListener,
     cache: Arc<Cache>,
+    hot: Hot,
     token: Arc<String>,
     shutdown: watch::Receiver<bool>,
 ) {
@@ -152,6 +216,7 @@ async fn accept_loop(
             }
         };
         let cache = Arc::clone(&cache);
+        let hot = hot.clone();
         let token = Arc::clone(&token);
         let permits = Arc::clone(&permits);
         let mut shutdown = shutdown.clone();
@@ -163,7 +228,7 @@ async fn accept_loop(
                 return;
             };
             let served = tokio::select! {
-                result = handle(stream, &cache, &token) => result,
+                result = handle(stream, &cache, &hot, &token) => result,
                 _ = shutdown.changed() => Ok(()),
             };
             if let Err(err) = served {
@@ -184,7 +249,7 @@ enum Reply {
     Status(u16, &'static str),
 }
 
-async fn handle(mut stream: TcpStream, cache: &Cache, token: &str) -> Result<()> {
+async fn handle(mut stream: TcpStream, cache: &Cache, hot: &Hot, token: &str) -> Result<()> {
     let _ = stream.set_nodelay(true);
 
     let head = match tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await {
@@ -197,7 +262,9 @@ async fn handle(mut stream: TcpStream, cache: &Cache, token: &str) -> Result<()>
     match decide(&head, token) {
         Reply::Status(code, reason) => write_status(&mut stream, code, reason).await,
         Reply::Head(id) => {
-            let Some((len, digest)) = length_and_digest(cache, &id) else {
+            let known = length_and_digest(cache, &id)
+                .or_else(|| hot.get(&id).map(|(data, digest)| (data.len() as u64, digest)));
+            let Some((len, digest)) = known else {
                 return write_status(&mut stream, 404, "Not Found").await;
             };
             let head = audio_headers(len, &digest);
@@ -207,14 +274,20 @@ async fn handle(mut stream: TcpStream, cache: &Cache, token: &str) -> Result<()>
             // The read is blocking, and it verifies the file against the length
             // recorded when it was stored — so a peer is never handed a track
             // that has rotted on this disk.
-            let data = match tokio::task::block_in_place(|| cache.read(&id)) {
-                Ok(data) => data,
-                Err(err) => {
-                    debug!(track = %id, "cannot serve: {err:#}");
-                    return write_status(&mut stream, 404, "Not Found").await;
+            // Off the disk first; failing that, the track playing here.
+            let (data, digest) = match tokio::task::block_in_place(|| cache.read(&id)) {
+                Ok(data) => {
+                    let digest = cache.digest(&id).unwrap_or_default();
+                    (data, digest)
                 }
+                Err(err) => match hot.get(&id) {
+                    Some(held) => held,
+                    None => {
+                        debug!(track = %id, "cannot serve: {err:#}");
+                        return write_status(&mut stream, 404, "Not Found").await;
+                    }
+                },
             };
-            let digest = cache.digest(&id).unwrap_or_default();
             let head = audio_headers(data.len() as u64, &digest);
             write_all(&mut stream, head.as_bytes()).await?;
             write_all(&mut stream, &data).await?;
@@ -532,6 +605,38 @@ mod tests {
             .await
             .expect("fetch from the peer");
         assert_eq!(fetched.as_ref(), audio.as_slice());
+    }
+
+    /// A track played here without being kept is served from memory: that is how
+    /// a neighbour whose account cannot play it still hears it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_track_held_only_in_memory_is_served_too() {
+        let temp = temp_cache("hot");
+        let hot = Hot::default();
+        let audio: Vec<u8> = (0..7_000u32).map(|n| (n % 241) as u8).collect();
+        hot.put("77", Bytes::from(audio.clone()));
+        assert_eq!(hot.ids(), ["77"]);
+
+        let server = serve_with(Arc::clone(&temp.cache), hot.clone(), TOKEN, 0).await.unwrap();
+        let endpoint = format!("http://127.0.0.1:{}", server.port());
+        let http = client().unwrap();
+
+        let fetched = fetch_from_peer(&http, &endpoint, TOKEN, "77")
+            .await
+            .expect("fetch from memory");
+        assert_eq!(fetched.as_ref(), audio.as_slice());
+    }
+
+    #[test]
+    fn memory_holds_only_the_last_few_tracks() {
+        let hot = Hot::default();
+        for id in ["1", "2", "3", "4"] {
+            hot.put(id, Bytes::from_static(b"audio"));
+        }
+        assert_eq!(hot.ids(), ["2", "3", "4"], "the oldest goes first");
+        // Putting one again moves it to the newest place instead of doubling it.
+        hot.put("2", Bytes::from_static(b"audio"));
+        assert_eq!(hot.ids(), ["3", "4", "2"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

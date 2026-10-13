@@ -129,8 +129,9 @@ pub async fn start(
 
     // 2. Serve this machine's cached tracks. Before the engine, so the port is
     //    known and can go out with the first announcement.
+    let hot = share::Hot::default();
     let share = if cfg.share.enabled {
-        match share::serve(Arc::clone(&cache), room_token, cfg.share.port).await {
+        match share::serve_with(Arc::clone(&cache), hot.clone(), room_token, cfg.share.port).await {
             Ok(server) => {
                 info!(port = server.port(), "sharing cached tracks with the room");
                 Some(server)
@@ -156,6 +157,7 @@ pub async fn start(
             likes,
             relay_url,
             share_port,
+            hot,
             hosting: join_url.clone(),
         },
     )

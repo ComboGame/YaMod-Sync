@@ -304,6 +304,8 @@ pub struct Wiring {
     pub relay_url: String,
     /// Port the local file server listens on, to be announced to the room.
     pub share_port: Option<u16>,
+    /// Tracks held in memory that the file server offers too.
+    pub hot: crate::share::Hot,
     /// The address to give other people, when this app is hosting.
     pub hosting: Option<String>,
 }
@@ -317,6 +319,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         likes,
         relay_url,
         share_port,
+        hot,
         hosting,
     } = wiring;
 
@@ -394,6 +397,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         downloading: None,
         streaming: None,
         shares: Vec::new(),
+        hot,
         roster: Vec::new(),
         reported_barrier: None,
         share_port,
@@ -666,6 +670,9 @@ struct Engine {
 
     /// Who in the room is offering cached tracks, as the relay last described it.
     shares: Vec<PeerShare>,
+    /// Tracks played from Yandex without being kept, offered to the room from
+    /// memory; see [`crate::share::Hot`].
+    hot: crate::share::Hot,
     /// Who is in the room, as the relay last listed them.
     roster: Vec<RosterEntry>,
     /// The last wait this peer said it was ready for, so it says so once.
@@ -1156,6 +1163,7 @@ impl Engine {
             // Whole-file by default; `start_load` opts the track about to play in.
             progressive: false,
             done: None,
+            hot: self.hot.clone(),
         }
     }
 
@@ -1316,7 +1324,15 @@ impl Engine {
         // Sharing off means an empty offer rather than silence, so a peer that saw
         // an earlier offer knows it has been withdrawn.
         let tracks = match self.share_port {
-            Some(_) => (*self.cached).clone(),
+            Some(_) => {
+                let mut tracks = (*self.cached).clone();
+                for id in self.hot.ids() {
+                    if !tracks.contains(&id) {
+                        tracks.push(id);
+                    }
+                }
+                tracks
+            }
             None => Vec::new(),
         };
         if !self.link.announce_share(self.share_port, tracks) {
@@ -1393,6 +1409,7 @@ impl Engine {
                 if stored {
                     self.refresh_cache_view();
                 }
+                self.share_dirty = true;
                 // A failure stays quiet on purpose: this track may never be
                 // reached, and the ordinary load will report it if it is.
                 if let Some((track, source, origin)) = ready {
@@ -1516,6 +1533,8 @@ impl Engine {
                 if stored {
                     self.refresh_cache_view();
                 }
+                // The whole track is in now, on disk or in memory: offer it.
+                self.share_dirty = true;
                 if let Some(error) = error {
                     self.notice = Some(error);
                 }
@@ -1539,6 +1558,9 @@ impl Engine {
                 self.loading = None;
                 if stored {
                     self.refresh_cache_view();
+                }
+                if matches!(origin, Some(Origin::Yandex)) {
+                    self.share_dirty = true;
                 }
 
                 // Started before it finished arriving: the rest keeps the network
@@ -1576,7 +1598,9 @@ impl Engine {
                         // relay will move the room on when the track's time is up.
                         LoadFailure::NotLicensed(message) => {
                             self.unavailable.insert(track_id);
-                            self.notice = Some(format!("пропускаю на этом аккаунте — {message}"));
+                            self.notice = Some(format!(
+                                "на этом аккаунте недоступен — возьму у участников комнаты, как только у них загрузится ({message})"
+                            ));
                         }
                         // Not the track's fault and not the account's: no internet,
                         // or the participant who has it cannot be reached. Put
@@ -1752,12 +1776,22 @@ impl Engine {
                     })
                     .cloned()
                     .collect();
-                for id in newly_offered {
-                    self.unavailable.remove(&id);
-                    self.deferred.remove(&id);
-                    self.attempts.remove(&id);
+                for id in &newly_offered {
+                    self.unavailable.remove(id);
+                    self.deferred.remove(id);
+                    self.attempts.remove(id);
                 }
                 self.shares = peers;
+                // The room is on one of those right now: fetch it from the
+                // neighbour at once rather than waiting for the next state.
+                if let Some(track) = self.remote.as_ref().and_then(|state| state.track.clone())
+                    && newly_offered.contains(&track.track_id)
+                    && self.loading.as_deref() != Some(track.track_id.as_str())
+                    && self.player.current_track_id().as_deref() != Some(track.track_id.as_str())
+                {
+                    self.notice = Some(format!("беру у участника {track}"));
+                    self.start_load(&track, internal);
+                }
             }
 
             Event::Error { code, message } => {
@@ -1806,7 +1840,12 @@ impl Engine {
         }
         let id = track.track_id.as_str();
         let staged = self.loading.is_none() && self.player.current_track_id().as_deref() == Some(id);
-        if !(staged || self.unavailable.contains(id) || self.set_aside(id)) {
+        // Cannot get it ourselves: with somebody else in the room, wait for them
+        // to offer it — the relay starts without us if that takes too long.
+        // Alone, there is nobody to wait for.
+        let cannot = self.unavailable.contains(id) || self.set_aside(id);
+        let alone = self.roster.len() <= 1;
+        if !(staged || (cannot && alone)) {
             return;
         }
         if self.link.report_ready(barrier) {
@@ -2029,6 +2068,8 @@ struct Fetch {
     progressive: bool,
     /// Where a download that outlives the fetch reports how it ended.
     done: Option<mpsc::UnboundedSender<Internal>>,
+    /// Where a track from Yandex that is not kept on disk is held for the room.
+    hot: crate::share::Hot,
 }
 
 /// A track ready to be handed to the player.
@@ -2140,6 +2181,11 @@ async fn fetch_source(fetch: &Fetch, want: &TrackRef) -> Result<Fetched, LoadFai
     };
     let stored = fetch.store && store(fetch, &track, &data).await.is_some();
 
+    // Not kept on disk: hold it in memory, so a neighbour whose account cannot
+    // play it can still get it from here.
+    if !stored {
+        fetch.hot.put(id, data.clone());
+    }
     let source = if fetch.player.needs_bytes() {
         AudioSource::Bytes(data)
     } else {
@@ -2212,10 +2258,13 @@ async fn stream_from_yandex(
             }
         }
         let mut stored = false;
-        if fetch.store
-            && let Some(data) = background.complete_bytes()
-        {
-            stored = store(&fetch, &keep, &data).await.is_some();
+        if let Some(data) = background.complete_bytes() {
+            if fetch.store {
+                stored = store(&fetch, &keep, &data).await.is_some();
+            }
+            if !stored {
+                fetch.hot.put(&queue_id, data);
+            }
         }
         if let Some(done) = &fetch.done {
             let _ = done.send(Internal::StreamDone {
