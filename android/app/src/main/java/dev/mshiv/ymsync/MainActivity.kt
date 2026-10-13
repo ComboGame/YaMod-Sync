@@ -55,6 +55,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -127,6 +128,8 @@ private val Dim = Color(0xFF8E8E99)
 private val Good = Color(0xFF4EC97A)
 private val Warn = Color(0xFFFFC72C)
 private val Bad = Color(0xFFFF5A5F)
+/// Marks a listener's own imported file.
+private val OwnFile = Color(0xFF8FB8FF)
 
 private val LikesGradient = Brush.linearGradient(listOf(Color(0xFFFF5A6E), Color(0xFFB3122F)))
 private val OfflineGradient = Brush.linearGradient(listOf(Color(0xFF3A7BFF), Color(0xFF2439A8)))
@@ -292,6 +295,8 @@ private fun App(settings: Settings) {
     var openAlbum by remember { mutableStateOf<AlbumInfo?>(null) }
     // One of the account's playlists, opened from the collection.
     var openPlaylist by remember { mutableStateOf<PlaylistInfo?>(null) }
+    // The artist of a track, opened from the player.
+    var openArtist by remember { mutableStateOf<TrackInfo?>(null) }
     // The lyrics, over everything like the full player.
     var lyricsOpen by rememberSaveable { mutableStateOf(false) }
     // Yandex's sign-in page, over everything.
@@ -396,6 +401,7 @@ private fun App(settings: Settings) {
     // An open album sits on top of the home page; back returns to it.
     BackHandler(enabled = openAlbum != null && !playerOpen) { openAlbum = null }
     BackHandler(enabled = openPlaylist != null && openAlbum == null && !playerOpen) { openPlaylist = null }
+    BackHandler(enabled = openArtist != null && !playerOpen) { openArtist = null }
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(
@@ -410,6 +416,7 @@ private fun App(settings: Settings) {
                         screen = it
                         openAlbum = null
                         openPlaylist = null
+                        openArtist = null
                     }
                 }
             },
@@ -421,7 +428,10 @@ private fun App(settings: Settings) {
             ) {
                 val album = openAlbum
                 val playlist = openPlaylist
-                if (album != null) {
+                val artistOf = openArtist
+                if (artistOf != null) {
+                    ArtistScreen(artistOf, room, onBack = { openArtist = null })
+                } else if (album != null) {
                     AlbumScreen(album, room, onBack = { openAlbum = null })
                 } else if (playlist != null) {
                     PlaylistScreen(playlist, room, onBack = { openPlaylist = null })
@@ -488,6 +498,10 @@ private fun App(settings: Settings) {
                     screen = Screen.QUEUE
                 },
                 onLyrics = { lyricsOpen = true },
+                onArtist = { track ->
+                    playerOpen = false
+                    openArtist = track
+                },
             )
         }
 
@@ -1003,9 +1017,29 @@ private fun AlbumScreen(album: AlbumInfo, room: Room, onBack: () -> Unit) {
 @Composable
 private fun PlaylistScreen(playlist: PlaylistInfo, room: Room, onBack: () -> Unit) {
     var count by remember(playlist.kind) { mutableStateOf<Int?>(null) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Удалить плейлист «${playlist.title}»?") },
+            text = { Text("Он удалится только с этого телефона. Треки останутся.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    room.scope.launch {
+                        Commands.playlistOp { put("op", "delete"); put("kind", playlist.kind) }
+                            .onSuccess { SyncHolder.say("плейлист «${playlist.title}» удалён"); onBack() }
+                            .onFailure { SyncHolder.say(it.message) }
+                    }
+                }) { Text("Удалить", color = Bad) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена") } },
+            containerColor = Surface2,
+        )
+    }
     TrackListPage(
         key = "playlist:${playlist.owner}:${playlist.kind}",
-        eyebrow = "ПЛЕЙЛИСТ",
+        eyebrow = if (playlist.isLocal) "ПЛЕЙЛИСТ НА ТЕЛЕФОНЕ" else "ПЛЕЙЛИСТ",
         title = playlist.title,
         facts = tracksWord(count ?: playlist.trackCount),
         coverUrl = playlist.coverUrl(400),
@@ -1013,8 +1047,51 @@ private fun PlaylistScreen(playlist: PlaylistInfo, room: Room, onBack: () -> Uni
         onBack = onBack,
         load = { Commands.playlistTracks(playlist.owner, playlist.kind) },
         onLoaded = { count = it.size },
+        onDelete = if (playlist.isLocal) ({ confirmDelete = true }) else null,
+        onRemove = if (playlist.isLocal) {
+            { track ->
+                Commands.playlistOp {
+                    put("op", "remove"); put("kind", playlist.kind); put("track_id", track.trackId)
+                }.onFailure { SyncHolder.say(it.message) }.isSuccess
+            }
+        } else {
+            null
+        },
     )
 }
+
+/// An artist's page: the portrait, how many listen, and their tracks most
+/// popular first. Opened by pressing the artist in the player.
+@Composable
+private fun ArtistScreen(track: TrackInfo, room: Room, onBack: () -> Unit) {
+    var artist by remember(track.trackId) { mutableStateOf<ArtistInfo?>(null) }
+    TrackListPage(
+        key = "artist:${track.trackId}",
+        eyebrow = "ИСПОЛНИТЕЛЬ",
+        title = artist?.name ?: track.artist,
+        facts = artist?.let { found ->
+            listOfNotNull(
+                found.monthlyListeners?.let { "${formatCount(it)} слушателей за месяц" },
+                found.likes?.let { "${formatCount(it)} в «Мне нравится»" },
+            ).joinToString(" · ")
+        } ?: "",
+        coverUrl = artist?.coverUrl(400),
+        room = room,
+        onBack = onBack,
+        load = {
+            Commands.artistPage(track.trackId).map { (found, tracks) ->
+                artist = found
+                tracks
+            }
+        },
+        onLoaded = {},
+        round = true,
+    )
+}
+
+/// «1 873 455», grouped the way a Russian reader expects.
+private fun formatCount(value: Long): String =
+    java.text.NumberFormat.getIntegerInstance(java.util.Locale.forLanguageTag("ru")).format(value)
 
 @Composable
 private fun TrackListPage(
@@ -1027,6 +1104,12 @@ private fun TrackListPage(
     onBack: () -> Unit,
     load: suspend () -> Result<List<TrackInfo>>,
     onLoaded: (List<TrackInfo>) -> Unit,
+    /// Offered on a playlist kept on this phone.
+    onDelete: (() -> Unit)? = null,
+    /// Takes a track out; answers whether it went. Offered on this phone's playlists.
+    onRemove: (suspend (TrackInfo) -> Boolean)? = null,
+    /// A round picture: an artist's portrait rather than a cover.
+    round: Boolean = false,
 ) {
     var tracks by remember(key) { mutableStateOf<List<TrackInfo>?>(null) }
     var problem by remember(key) { mutableStateOf<String?>(null) }
@@ -1069,7 +1152,7 @@ private fun TrackListPage(
                 CoverArt(
                     url = coverUrl,
                     size = 120.dp,
-                    corner = 14.dp,
+                    corner = if (round) 60.dp else 14.dp,
                     modifier = Modifier.shadow(12.dp, RoundedCornerShape(14.dp)),
                 )
                 Spacer(Modifier.width(16.dp))
@@ -1101,6 +1184,9 @@ private fun TrackListPage(
                     room.enqueue(list)
                     SyncHolder.say("в очереди: «$title»")
                 }
+                onDelete?.let { delete ->
+                    IconButton(onClick = delete) { Icon(AppIcons.Close, "удалить плейлист", tint = Bad) }
+                }
             }
         }
 
@@ -1111,7 +1197,20 @@ private fun TrackListPage(
         }
 
         itemsIndexed(list, key = { index, track -> "at${track.trackId}$index" }) { index, track ->
-            TrackRow(track = track, room = room, onClick = { room.playFrom(list, index) })
+            TrackRow(
+                track = track,
+                room = room,
+                onClick = { room.playFrom(list, index) },
+                extra = onRemove?.let { remove ->
+                    {
+                        IconButton(onClick = {
+                            room.scope.launch {
+                                if (remove(track)) tracks = tracks?.filter { it.trackId != track.trackId }
+                            }
+                        }) { Icon(AppIcons.Close, "убрать из плейлиста", tint = Dim, modifier = Modifier.size(20.dp)) }
+                    }
+                },
+            )
         }
     }
 }
@@ -1436,7 +1535,7 @@ private fun LibraryScreen(
                 when {
                     found == null && playlistsProblem != null -> item { Empty(playlistsProblem ?: "") }
                     found == null -> item { Empty("загружаю плейлисты…") }
-                    found.isEmpty() -> item { Empty("У аккаунта нет своих плейлистов") }
+                    found.isEmpty() -> item { Empty("Плейлистов пока нет — создайте его кнопкой «в плейлист» в плеере") }
                     else -> items(found.chunked(2).size) { row ->
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1468,7 +1567,11 @@ private fun PlaylistCard(playlist: PlaylistInfo, modifier: Modifier, onClick: ()
             CoverArt(url = playlist.coverUrl(400), corner = 12.dp, modifier = Modifier.fillMaxSize())
         }
         Text(playlist.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(tracksWord(playlist.trackCount), color = Dim, fontSize = 12.sp)
+        Text(
+            if (playlist.isLocal) "на телефоне · ${tracksWord(playlist.trackCount)}" else tracksWord(playlist.trackCount),
+            color = Dim,
+            fontSize = 12.sp,
+        )
     }
 }
 
@@ -2091,8 +2194,10 @@ private fun MiniPlayer(room: Room, onOpen: () -> Unit) {
             }
             // Beside the title rather than with the transport: the transport acts
             // on the room, this acts on the track and on this account.
-            HeartButton(snapshot.trackLiked) {
-                room.scope.launch { Commands.like(track, !snapshot.trackLiked)?.let { SyncHolder.say(it) } }
+            if (!track.isOwn) {
+                HeartButton(snapshot.trackLiked) {
+                    room.scope.launch { Commands.like(track, !snapshot.trackLiked)?.let { SyncHolder.say(it) } }
+                }
             }
             IconButton(onClick = { room.send("toggle") }, enabled = room.canDrive) {
                 Icon(if (snapshot.playing) AppIcons.Pause else AppIcons.Play, "пауза / продолжить", tint = Color.White)
@@ -2122,7 +2227,17 @@ private fun MiniPlayer(room: Room, onOpen: () -> Unit) {
 
 /// The full-screen player, painted in its cover's colour as the Yandex app does.
 @Composable
-private fun FullPlayer(room: Room, onClose: () -> Unit, onQueue: () -> Unit, onLyrics: () -> Unit) {
+private fun FullPlayer(
+    room: Room,
+    onClose: () -> Unit,
+    onQueue: () -> Unit,
+    onLyrics: () -> Unit,
+    onArtist: (TrackInfo) -> Unit,
+) {
+    var choosing by remember { mutableStateOf(false) }
+    room.snapshot?.track?.let { playing ->
+        if (choosing) AddToPlaylistDialog(playing, room, onDone = { choosing = false })
+    }
     val snapshot = room.snapshot ?: return
     val track = snapshot.track
     val cover = rememberCover(track, 800)
@@ -2192,17 +2307,37 @@ private fun FullPlayer(room: Room, onClose: () -> Unit, onQueue: () -> Unit, onL
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    track?.artist ?: "",
-                    color = Color.White.copy(alpha = 0.7f),
-                    fontSize = 17.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (track?.isOwn == true) {
+                        Icon(
+                            AppIcons.File,
+                            "свой файл — не из Яндекс Музыки",
+                            tint = OwnFile,
+                            modifier = Modifier.padding(end = 6.dp).size(18.dp),
+                        )
+                    }
+                    Text(
+                        track?.artist ?: "",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 17.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        // The artist's page — not for an own file, which Yandex
+                        // knows nothing about.
+                        modifier = Modifier.clickable(enabled = track != null && !track.isOwn) {
+                            track?.let(onArtist)
+                        },
+                    )
+                }
             }
             if (track != null) {
-                HeartButton(snapshot.trackLiked, size = 28.dp, idle = Color.White) {
-                    room.scope.launch { Commands.like(track, !snapshot.trackLiked)?.let { SyncHolder.say(it) } }
+                IconButton(onClick = { choosing = true }) {
+                    Icon(AppIcons.PlaylistAdd, "в плейлист", tint = Color.White, modifier = Modifier.size(26.dp))
+                }
+                if (!track.isOwn) {
+                    HeartButton(snapshot.trackLiked, size = 28.dp, idle = Color.White) {
+                        room.scope.launch { Commands.like(track, !snapshot.trackLiked)?.let { SyncHolder.say(it) } }
+                    }
                 }
             }
         }
@@ -2354,6 +2489,81 @@ private fun Color.compositeOn(background: Color): Color {
         red = red * a + background.red * (1 - a),
         green = green * a + background.green * (1 - a),
         blue = blue * a + background.blue * (1 - a),
+    )
+}
+
+// ---------------------------------------------------------------- playlists
+
+/// Picks a playlist for the playing track, or makes a new one on this phone.
+@Composable
+private fun AddToPlaylistDialog(track: TrackInfo, room: Room, onDone: () -> Unit) {
+    var playlists by remember { mutableStateOf<List<PlaylistInfo>?>(null) }
+    var problem by remember { mutableStateOf<String?>(null) }
+    var name by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        Commands.myPlaylists()
+            .onSuccess { playlists = it }
+            .onFailure { problem = it.message; playlists = emptyList() }
+    }
+    fun add(playlist: PlaylistInfo) {
+        room.scope.launch {
+            Commands.playlistOp {
+                put("op", "add"); put("owner", playlist.owner); put("kind", playlist.kind); put("track", track.toJson())
+            }
+                .onSuccess { SyncHolder.say("${it.optString("message")}: «${playlist.title}»") }
+                .onFailure { SyncHolder.say(it.message) }
+            onDone()
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDone,
+        containerColor = Surface2,
+        title = { Text("Добавить в плейлист") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                val found = playlists
+                when {
+                    found == null -> Text("загружаю плейлисты…", color = Dim)
+                    found.isEmpty() -> Text(problem ?: "плейлистов пока нет — создайте первый ниже", color = Dim)
+                }
+                LazyColumn(Modifier.heightIn(max = 280.dp)) {
+                    items(found.orEmpty()) { playlist ->
+                        // Yandex takes only its own tracks into its playlists.
+                        val allowed = playlist.isLocal || !track.isOwn
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable(enabled = allowed) { add(playlist) }
+                                .padding(horizontal = 8.dp, vertical = 10.dp),
+                        ) {
+                            Text(
+                                playlist.title,
+                                color = if (allowed) Color.White else Dim,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(if (playlist.isLocal) "на телефоне" else "Яндекс", color = Dim, fontSize = 12.sp)
+                        }
+                    }
+                }
+                HorizontalDivider(color = Surface3)
+                Field(name, { name = it.take(80) }, "новый плейлист на телефоне")
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = name.isNotBlank(), onClick = {
+                room.scope.launch {
+                    Commands.playlistOp { put("op", "create"); put("title", name); put("track", track.toJson()) }
+                        .onSuccess { SyncHolder.say("создан плейлист «${name.trim()}» с этим треком") }
+                        .onFailure { SyncHolder.say(it.message) }
+                    onDone()
+                }
+            }) { Text("Создать") }
+        },
+        dismissButton = { TextButton(onClick = onDone) { Text("Отмена") } },
     )
 }
 
@@ -2558,6 +2768,7 @@ private fun TrackRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (track.isOwn) MarkIcon(AppIcons.File, OwnFile, "свой файл — не из Яндекс Музыки")
                 when (mark) {
                     Mark.DISK -> MarkIcon(AppIcons.Disk, Good, "есть на этом устройстве")
                     Mark.LAN -> MarkIcon(AppIcons.Lan, Accent, "есть у кого-то в комнате")
@@ -2606,7 +2817,12 @@ private fun TrackRow(
                 }
             }
         }
-        HeartButton(track.trackId in room.likedIds) { room.like(track) }
+        if (track.isOwn) {
+            // A like is Yandex's; the column stays so rows line up.
+            Spacer(Modifier.size(48.dp))
+        } else {
+            HeartButton(track.trackId in room.likedIds) { room.like(track) }
+        }
         extra?.invoke()
     }
 }

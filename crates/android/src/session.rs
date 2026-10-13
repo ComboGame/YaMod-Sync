@@ -13,6 +13,7 @@ use ymsync::config::Config;
 use ymsync::engine::{Command, Handle};
 use ymsync::playback::Playback;
 use ymsync::player::Player;
+use ymsync::playlists::{self, Playlists};
 use ymsync::session::{self as core, Session as CoreSession};
 use ymsync_proto::{RepeatMode, TrackRef};
 
@@ -89,6 +90,8 @@ pub struct Session {
     /// `None` when the phone has no Yandex token: it then plays what it has
     /// downloaded, and whatever the room's other devices can supply.
     api: Option<Arc<YandexMusic>>,
+    /// Playlists kept on this phone, beside the downloads.
+    playlists: Arc<Playlists>,
     /// Queue revision Kotlin has already been given; see [`Session::snapshot`].
     sent_revision: AtomicU64,
     /// Same idea for the list of downloaded ids.
@@ -125,6 +128,7 @@ impl Session {
         // «Мне нравится» lives beside the downloads, and like them it is read off
         // the disk first, so the hearts are right before Yandex has answered.
         let likes = core::open_likes(&cache);
+        let playlists = Playlists::open(cache.directory());
         let core = runtime.block_on(core::start(
             &cfg,
             api.clone(),
@@ -137,6 +141,7 @@ impl Session {
             runtime,
             core,
             api,
+            playlists,
             // Revisions start at 1, so the first queue is always sent.
             sent_revision: AtomicU64::new(0),
             // The cache revision does start at 0, so this one has to begin
@@ -251,15 +256,86 @@ impl Session {
         Ok(tracks.iter().map(Track::to_track_ref).collect())
     }
 
-    /// The account's own playlists, for the collection.
+    /// The playlists for the collection: this phone's first, then the
+    /// account's. With no account or no internet the phone's are still listed.
     pub fn my_playlists(&self) -> Result<serde_json::Value> {
+        let mut all = self.playlists.list();
+        if let Some(api) = self.api.as_ref() {
+            match self.runtime.block_on(api.my_playlists()) {
+                Ok(found) => all.extend(found),
+                Err(err) if all.is_empty() => return Err(err),
+                // The phone's own are shown; the account's will be there next time.
+                Err(_) => {}
+            }
+        }
+        Ok(serde_json::json!({ "playlists": all }))
+    }
+
+    /// One change to a playlist, as `{"op": …}`: `add` (owner, kind, track),
+    /// `create` (title, optional track), `delete` (kind), `remove` (kind,
+    /// track_id). Answers what to tell the listener, and for `create` the card.
+    pub fn playlist_op(&self, request_json: &str) -> Result<serde_json::Value> {
+        let request: serde_json::Value = serde_json::from_str(request_json).context("разбор запроса")?;
+        let text = |key: &str| request.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let track = || -> Result<TrackRef> {
+            serde_json::from_value(request.get("track").cloned().unwrap_or_default()).context("разбор трека")
+        };
+        match text("op").as_str() {
+            "add" => {
+                let (owner, kind, track) = (text("owner"), text("kind"), track()?);
+                let added = if owner == playlists::LOCAL_OWNER {
+                    self.playlists.add(&kind, track)?
+                } else {
+                    if playlists::is_own_file(&track.track_id) {
+                        bail!("свой файл нельзя добавить в плейлист Яндекса — только в плейлист на телефоне");
+                    }
+                    let api = self.api()?;
+                    self.runtime.block_on(api.add_to_playlist(&kind, &track.track_id, track.album_id.as_deref()))?
+                };
+                let message = if added { "добавлено в плейлист" } else { "уже есть в этом плейлисте" };
+                Ok(serde_json::json!({ "message": message }))
+            }
+            "create" => {
+                let mut card = self.playlists.create(&text("title"))?;
+                if request.get("track").is_some_and(|t| !t.is_null()) {
+                    self.playlists.add(&card.kind, track()?)?;
+                    card.track_count = 1;
+                }
+                Ok(serde_json::json!({ "message": "плейлист создан", "playlist": card }))
+            }
+            "delete" => {
+                self.playlists.delete(&text("kind"))?;
+                Ok(serde_json::json!({ "message": "плейлист удалён" }))
+            }
+            "remove" => {
+                self.playlists.remove_track(&text("kind"), &text("track_id"))?;
+                Ok(serde_json::json!({ "message": "убрано из плейлиста" }))
+            }
+            other => bail!("неизвестное действие с плейлистом: {other}"),
+        }
+    }
+
+    /// The page of whoever sings `track_id`: the artist, and their tracks most
+    /// popular first.
+    pub fn artist_page(&self, track_id: &str) -> Result<serde_json::Value> {
+        if playlists::is_own_file(track_id) {
+            bail!("это свой файл — у Яндекса нет страницы его исполнителя");
+        }
         let api = self.api()?;
-        let playlists = self.runtime.block_on(api.my_playlists())?;
-        Ok(serde_json::json!({ "playlists": playlists }))
+        let artist_id = self
+            .runtime
+            .block_on(api.artist_of(track_id.trim()))?
+            .context("Яндекс не знает исполнителя этого трека")?;
+        let (artist, tracks) = self.runtime.block_on(api.artist_page(&artist_id))?;
+        let tracks: Vec<TrackRef> = tracks.iter().map(Track::to_track_ref).collect();
+        Ok(serde_json::json!({ "artist": artist, "tracks": tracks }))
     }
 
     /// A playlist's tracks, for its page. Nothing is queued.
     pub fn playlist_tracks(&self, owner: &str, kind: &str) -> Result<Vec<TrackRef>> {
+        if owner == playlists::LOCAL_OWNER {
+            return self.playlists.tracks(kind);
+        }
         let api = self.api()?;
         let tracks = self
             .runtime
@@ -269,6 +345,10 @@ impl Session {
 
     /// The words of a track; `lyrics` is null when Yandex has none.
     pub fn lyrics(&self, track_id: &str) -> Result<serde_json::Value> {
+        // An imported file is not Yandex's to know the words of.
+        if playlists::is_own_file(track_id) {
+            return Ok(serde_json::json!({ "lyrics": null }));
+        }
         let api = self.api()?;
         let lyrics = self.runtime.block_on(api.lyrics(track_id.trim()))?;
         Ok(serde_json::json!({ "lyrics": lyrics }))

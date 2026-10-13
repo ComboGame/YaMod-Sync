@@ -22,6 +22,9 @@ data class TrackInfo(
      */
     fun coverUrl(size: Int): String? = coverUrlOf(coverUri, size)
 
+    /** One of the listener's own imported files, not a Yandex track. */
+    val isOwn: Boolean get() = trackId.startsWith("local_")
+
     /**
      * The shape `Native.queueTracks` takes: `ymsync_proto::TrackRef`.
      *
@@ -133,6 +136,31 @@ fun JSONObject.toAlbumInfo(): AlbumInfo =
         trackCount = if (isNull("track_count")) null else optInt("track_count"),
     )
 
+/** The owner a playlist kept on this phone reports. */
+const val LOCAL_OWNER = "local"
+
+/** An artist's page head. */
+data class ArtistInfo(
+    val id: String,
+    val name: String,
+    val coverUri: String?,
+    val monthlyListeners: Long?,
+    val likes: Long?,
+    val trackCount: Int?,
+) {
+    fun coverUrl(size: Int): String? = coverUrlOf(coverUri, size)
+}
+
+fun JSONObject.toArtistInfo(): ArtistInfo =
+    ArtistInfo(
+        id = optString("id"),
+        name = optString("name"),
+        coverUri = if (isNull("cover_uri")) null else optString("cover_uri"),
+        monthlyListeners = if (isNull("monthly_listeners")) null else optLong("monthly_listeners"),
+        likes = if (isNull("likes")) null else optLong("likes"),
+        trackCount = if (isNull("track_count")) null else optInt("track_count"),
+    )
+
 /** One of the account's own playlists, as a card shows it. */
 data class PlaylistInfo(
     val owner: String,
@@ -142,6 +170,9 @@ data class PlaylistInfo(
     val coverUri: String?,
 ) {
     fun coverUrl(size: Int): String? = coverUrlOf(coverUri, size)
+
+    /** Kept on this phone rather than in the account. */
+    val isLocal: Boolean get() = owner == LOCAL_OWNER
 }
 
 fun JSONObject.toPlaylistInfo(): PlaylistInfo =

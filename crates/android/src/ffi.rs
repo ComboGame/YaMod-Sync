@@ -15,6 +15,8 @@
 //!     external fun myPlaylists(handle: Long): String
 //!     external fun playlistTracks(handle: Long, owner: String, kind: String): String
 //!     external fun lyrics(handle: Long, trackId: String): String
+//!     external fun playlistOp(handle: Long, requestJson: String): String
+//!     external fun artistPage(handle: Long, trackId: String): String
 //!     external fun queueTracks(handle: Long, tracksJson: String, replace: Boolean, start: Int): String
 //!     external fun queueFrom(handle: Long, kind: String, value: String, replace: Boolean): String
 //!     external fun importTrack(handle: Long, name: String, data: ByteArray): String
@@ -241,6 +243,48 @@ pub extern "system" fn Java_dev_mshiv_ymsync_Native_playlistTracks(
             None => failed("сессия не запущена"),
             Some(session) => match session.playlist_tracks(&owner, &kind) {
                 Ok(tracks) => ok(serde_json::json!({ "tracks": tracks })),
+                Err(err) => failed(err),
+            },
+        },
+    };
+    reply(&mut env, &text)
+}
+
+/// One change to a playlist; see `Session::playlist_op`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_mshiv_ymsync_Native_playlistOp(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    request_json: JString,
+) -> jstring {
+    let text = match read(&mut env, &request_json) {
+        Err(err) => failed(err),
+        Ok(json) => match unsafe { borrow(handle) } {
+            None => failed("сессия не запущена"),
+            Some(session) => match session.playlist_op(&json) {
+                Ok(value) => ok(value),
+                Err(err) => failed(err),
+            },
+        },
+    };
+    reply(&mut env, &text)
+}
+
+/// The page of a track's artist.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_mshiv_ymsync_Native_artistPage(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    track_id: JString,
+) -> jstring {
+    let text = match read(&mut env, &track_id) {
+        Err(err) => failed(err),
+        Ok(id) => match unsafe { borrow(handle) } {
+            None => failed("сессия не запущена"),
+            Some(session) => match session.artist_page(&id) {
+                Ok(value) => ok(value),
                 Err(err) => failed(err),
             },
         },

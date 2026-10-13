@@ -46,6 +46,12 @@ object Native {
     /** A playlist's tracks, for its screen. Queues nothing. */
     external fun playlistTracks(handle: Long, owner: String, kind: String): String
 
+    /** One change to a playlist: `{"op": "add" | "create" | "delete" | "remove", …}`. */
+    external fun playlistOp(handle: Long, requestJson: String): String
+
+    /** The page of a track's artist: the artist and their tracks, most popular first. */
+    external fun artistPage(handle: Long, trackId: String): String
+
     /** A track's words; `lyrics` is null when Yandex has none. */
     external fun lyrics(handle: Long, trackId: String): String
 

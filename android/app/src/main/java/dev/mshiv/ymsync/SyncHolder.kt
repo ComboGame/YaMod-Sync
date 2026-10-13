@@ -198,6 +198,31 @@ object Commands {
         }
     }
 
+    /** One change to a playlist; answers what the core said. */
+    suspend fun playlistOp(build: JSONObject.() -> Unit): Result<JSONObject> {
+        val handle = SyncHolder.handle
+        if (handle == 0L) return Result.failure(IllegalStateException("нет подключения"))
+        val request = JSONObject().apply(build).toString()
+        return when (val reply = withContext(Dispatchers.IO) { parseReply(Native.playlistOp(handle, request)) }) {
+            is NativeResult.Failed -> Result.failure(IllegalStateException(reply.message))
+            is NativeResult.Ok -> Result.success(reply.value)
+        }
+    }
+
+    /** The page of whoever sings `trackId`. */
+    suspend fun artistPage(trackId: String): Result<Pair<ArtistInfo, List<TrackInfo>>> {
+        val handle = SyncHolder.handle
+        if (handle == 0L) return Result.failure(IllegalStateException("нет подключения"))
+        return when (val reply = withContext(Dispatchers.IO) { parseReply(Native.artistPage(handle, trackId)) }) {
+            is NativeResult.Failed -> Result.failure(IllegalStateException(reply.message))
+            is NativeResult.Ok -> {
+                val artist = reply.value.optJSONObject("artist")?.toArtistInfo()
+                    ?: return Result.failure(IllegalStateException("пустой ответ"))
+                Result.success(artist to (reply.value.optJSONArray("tracks")?.toTrackList() ?: emptyList()))
+            }
+        }
+    }
+
     /** Puts tracks right after the one playing, for the whole room. */
     suspend fun playNext(tracks: List<TrackInfo>): String? =
         send("play_next") { put("tracks", tracks.toJsonArray()) }
