@@ -23,6 +23,7 @@ use ymsync_proto::RepeatMode;
 use ymsync::import;
 use ymsync::likes::Likes;
 use ymsync::player::Player;
+use ymsync::playlists::{self, Playlists};
 use ymsync::session::{self, Session};
 use ymsync_proto::TrackRef;
 
@@ -47,6 +48,8 @@ struct AppState {
     /// The account's «Мне нравится», read off the disk for the same reason: the
     /// list and the hearts drawn from it are on screen before anything connects.
     likes: Mutex<Option<Arc<Likes>>>,
+    /// Playlists kept on this device, beside the downloads.
+    playlists: Mutex<Option<Arc<Playlists>>>,
     /// The engine plus whatever it brought up — a hosted relay, the file server
     /// for cached tracks. Held whole so that disconnecting closes those ports.
     session: SessionSlot,
@@ -103,6 +106,19 @@ impl AppState {
         let likes = session::open_likes(&cache);
         *slot = Some(Arc::clone(&likes));
         Ok(likes)
+    }
+
+    /// The playlists on this device. Like the likes, they need only the cache
+    /// directory.
+    async fn playlists(&self) -> Result<Arc<Playlists>, String> {
+        let cache = self.cache().await?;
+        let mut slot = self.playlists.lock().await;
+        if let Some(playlists) = slot.as_ref() {
+            return Ok(Arc::clone(playlists));
+        }
+        let playlists = Playlists::open(cache.directory());
+        *slot = Some(Arc::clone(&playlists));
+        Ok(playlists)
     }
 
     /// Remembers the settings a successful connection was made with.
@@ -481,11 +497,107 @@ async fn play_next(tracks: Vec<TrackRef>, state: State<'_, AppState>) -> Result<
     send(&state, Command::PlayNext { tracks }).await
 }
 
-/// The account's own playlists, for the collection.
+/// The playlists for the collection: this device's first, then the account's.
+///
+/// The account's need Yandex; when it cannot be reached the local ones are still
+/// shown, and only a collection with nothing at all reports the failure.
 #[tauri::command]
 async fn my_playlists(state: State<'_, AppState>) -> Result<Vec<api::PlaylistInfo>, String> {
+    let mut all = state.playlists().await?.list();
+    match state.api_if_any().await {
+        Ok(Some(api)) => match api.my_playlists().await {
+            Ok(found) => all.extend(found),
+            Err(err) if all.is_empty() => return Err(fail(err)),
+            Err(err) => tracing::info!("плейлисты аккаунта не загрузились: {err:#}"),
+        },
+        Ok(None) => {}
+        Err(err) if all.is_empty() => return Err(err),
+        Err(_) => {}
+    }
+    Ok(all)
+}
+
+/// Puts a track into a playlist: one on this device, or one of the account's.
+/// Answers what to tell the listener.
+#[tauri::command]
+async fn add_to_playlist(
+    owner: String,
+    kind: String,
+    track: TrackRef,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if owner == playlists::LOCAL_OWNER {
+        let added = state.playlists().await?.add(&kind, track).map_err(fail)?;
+        return Ok(if added { "добавлено в плейлист" } else { "уже есть в этом плейлисте" }.to_string());
+    }
+    if playlists::is_own_file(&track.track_id) {
+        return Err("свой файл нельзя добавить в плейлист Яндекса — только в плейлист на этом устройстве".to_string());
+    }
     let api = state.api().await?;
-    api.my_playlists().await.map_err(fail)
+    let added = api
+        .add_to_playlist(&kind, &track.track_id, track.album_id.as_deref())
+        .await
+        .map_err(fail)?;
+    Ok(if added { "добавлено в плейлист" } else { "уже есть в этом плейлисте" }.to_string())
+}
+
+/// An artist's page, for the artist of a track.
+#[derive(Serialize)]
+struct ArtistPage {
+    artist: api::ArtistInfo,
+    /// Most popular first.
+    tracks: Vec<TrackRef>,
+}
+
+/// The page of whoever sings `track_id`.
+#[tauri::command]
+async fn artist_page(track_id: String, state: State<'_, AppState>) -> Result<ArtistPage, String> {
+    if playlists::is_own_file(&track_id) {
+        return Err("это свой файл — у Яндекса нет страницы его исполнителя".to_string());
+    }
+    let api = state.api().await?;
+    let artist_id = api
+        .artist_of(track_id.trim())
+        .await
+        .map_err(fail)?
+        .ok_or_else(|| "Яндекс не знает исполнителя этого трека".to_string())?;
+    let (artist, tracks) = api.artist_page(&artist_id).await.map_err(fail)?;
+    Ok(ArtistPage {
+        artist,
+        tracks: tracks.iter().map(Track::to_track_ref).collect(),
+    })
+}
+
+/// Makes a playlist on this device, optionally with a first track.
+#[tauri::command]
+async fn create_playlist(
+    title: String,
+    track: Option<TrackRef>,
+    state: State<'_, AppState>,
+) -> Result<api::PlaylistInfo, String> {
+    let playlists = state.playlists().await?;
+    let mut card = playlists.create(&title).map_err(fail)?;
+    if let Some(track) = track {
+        playlists.add(&card.kind, track).map_err(fail)?;
+        card.track_count = 1;
+    }
+    Ok(card)
+}
+
+/// Deletes a playlist on this device. The account's are left to Yandex's apps.
+#[tauri::command]
+async fn delete_playlist(kind: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.playlists().await?.delete(&kind).map_err(fail)
+}
+
+/// Takes a track out of a playlist on this device.
+#[tauri::command]
+async fn remove_from_playlist(
+    kind: String,
+    track_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.playlists().await?.remove_track(&kind, &track_id).map_err(fail)
 }
 
 /// A playlist's tracks, for its page. Like an album's, nothing is queued here.
@@ -495,6 +607,9 @@ async fn playlist_tracks(
     kind: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<TrackRef>, String> {
+    if owner == playlists::LOCAL_OWNER {
+        return state.playlists().await?.tracks(&kind).map_err(fail);
+    }
     let api = state.api().await?;
     let tracks = api
         .playlist_tracks(owner.trim(), kind.trim())
@@ -506,6 +621,10 @@ async fn playlist_tracks(
 /// The words of a track; `None` when Yandex has none.
 #[tauri::command]
 async fn lyrics(id: String, state: State<'_, AppState>) -> Result<Option<api::Lyrics>, String> {
+    // An imported file is not Yandex's to know the words of.
+    if playlists::is_own_file(&id) {
+        return Ok(None);
+    }
     let api = state.api().await?;
     api.lyrics(id.trim()).await.map_err(fail)
 }
@@ -905,6 +1024,7 @@ fn main() {
                 api: Mutex::new(None),
                 cache: Mutex::new(None),
                 likes: Mutex::new(None),
+                playlists: Mutex::new(None),
                 session: SessionSlot::default(),
             });
             Ok(())
@@ -938,7 +1058,12 @@ fn main() {
             my_playlists,
             playlist_tracks,
             lyrics,
-            yandex_login
+            yandex_login,
+            add_to_playlist,
+            create_playlist,
+            delete_playlist,
+            remove_from_playlist,
+            artist_page
         ])
         .run(tauri::generate_context!())
         .expect("не удалось запустить окно");

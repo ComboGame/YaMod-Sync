@@ -294,6 +294,49 @@ impl YandexMusic {
         Ok(true)
     }
 
+    /// Who sings a track: its first artist's id. `None` for a track Yandex
+    /// lists with no artist id.
+    pub async fn artist_of(&self, track_id: &str) -> Result<Option<String>> {
+        let track = self.track(track_id).await?;
+        Ok(track
+            .artists
+            .into_iter()
+            .find_map(|artist| artist.id.map(|id| id.0)))
+    }
+
+    /// An artist's page: the portrait and the numbers, and their tracks most
+    /// popular first.
+    pub async fn artist_page(&self, artist_id: &str) -> Result<(ArtistInfo, Vec<Track>)> {
+        let brief: RawBriefInfo = self
+            .get_result(&format!("/artists/{artist_id}/brief-info"), &[])
+            .await
+            .with_context(|| format!("запрос исполнителя {artist_id}"))?;
+        let info = brief.into_info();
+
+        let ranked: RawTrackIds = self
+            .get_result(&format!("/artists/{artist_id}/track-ids-by-rating"), &[])
+            .await
+            .with_context(|| format!("запрос треков исполнителя {artist_id}"))?;
+        let ids: Vec<String> = ranked.tracks.into_iter().take(ARTIST_TRACKS).map(|id| id.0).collect();
+
+        let mut tracks = Vec::with_capacity(ids.len());
+        for batch in ids.chunks(100) {
+            let joined = batch.join(",");
+            let found: Vec<Track> = self
+                .post_result("/tracks", &[("track-ids", joined.as_str()), ("with-positions", "false")])
+                .await
+                .context("запрос треков исполнителя")?;
+            tracks.extend(found);
+        }
+        // The batch endpoint does not promise the order asked for; the rating
+        // order is the point of this list, so it is put back.
+        let rank: std::collections::HashMap<&str, usize> =
+            ids.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect();
+        tracks.sort_by_key(|track| rank.get(track.id.0.as_str()).copied().unwrap_or(usize::MAX));
+        tracks.retain(|track| track.available);
+        Ok((info, tracks))
+    }
+
     /// The account's own «Мне нравится», newest first.
     ///
     /// This is playlist 3 of the account, which answers with whole tracks —
@@ -522,6 +565,17 @@ impl YandexMusic {
     async fn get_body(&self, url: &str, query: &[(&str, &str)]) -> Result<String> {
         self.send(self.authorized(self.http.get(url)).query(query), url)
             .await
+    }
+
+    /// A form POST whose answer is wanted, unwrapped like [`Self::get_result`]'s.
+    async fn post_result<T: DeserializeOwned>(&self, path: &str, form: &[(&str, &str)]) -> Result<T> {
+        let body = self.post_form(path, form).await?;
+        let document: serde_json::Value = serde_json::from_str(&body)
+            .with_context(|| format!("ответ {path} не является JSON: {}", excerpt(&body)))?;
+        let envelope: Envelope<T> = serde_json::from_value(document).with_context(|| {
+            format!("неожиданная структура ответа {path}: {}", excerpt(&body))
+        })?;
+        Ok(envelope.result)
     }
 
     /// A form POST. The two «Мне нравится» endpoints are the only writes this
@@ -1158,8 +1212,91 @@ impl Track {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Artist {
     #[serde(default)]
+    pub id: Option<Id>,
+    #[serde(default)]
     pub name: String,
 }
+
+/// An artist's page: who, how many listen, and the portrait.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtistInfo {
+    pub id: String,
+    pub name: String,
+    /// A cover template like a track's: the portrait.
+    pub cover_uri: Option<String>,
+    /// Listeners over the last month, as Yandex counts them.
+    pub monthly_listeners: Option<u64>,
+    /// How many have the artist in their likes.
+    pub likes: Option<u64>,
+    /// How many tracks Yandex has by the artist.
+    pub track_count: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawBriefInfo {
+    artist: RawArtist,
+    #[serde(default)]
+    stats: Option<RawArtistStats>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawArtist {
+    id: Id,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    cover: Option<RawCover>,
+    #[serde(default)]
+    og_image: Option<String>,
+    #[serde(default)]
+    likes_count: Option<u64>,
+    #[serde(default)]
+    counts: Option<RawArtistCounts>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawArtistCounts {
+    #[serde(default)]
+    tracks: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawArtistStats {
+    #[serde(default)]
+    last_month_listeners: Option<u64>,
+}
+
+impl RawBriefInfo {
+    fn into_info(self) -> ArtistInfo {
+        let artist = self.artist;
+        ArtistInfo {
+            id: artist.id.0,
+            name: artist.name,
+            cover_uri: artist
+                .cover
+                .and_then(|cover| cover.uri)
+                .or(artist.og_image)
+                .filter(|uri| !uri.trim().is_empty()),
+            monthly_listeners: self.stats.and_then(|stats| stats.last_month_listeners),
+            likes: artist.likes_count,
+            track_count: artist.counts.and_then(|counts| counts.tracks),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTrackIds {
+    #[serde(default)]
+    tracks: Vec<Id>,
+}
+
+/// How many of an artist's tracks the page lists. The rating order puts what
+/// anyone would look for first; beyond this it is the long tail.
+const ARTIST_TRACKS: usize = 200;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1319,6 +1456,29 @@ mod tests {
         assert_eq!(sign.len(), 32, "md5 hex digest");
         assert!(sign.chars().all(|c| c.is_ascii_hexdigit()), "{sign}");
         assert_eq!(tail, "6512ab00/get-mp3/abc/1.mp3");
+    }
+
+    #[test]
+    fn an_artist_page_reads_what_it_shows() {
+        let brief: RawBriefInfo = serde_json::from_str(
+            r#"{"artist": {"id": 41191, "name": "Кино", "likesCount": 512000,
+                 "cover": {"type": "from-artist-photos", "uri": "avatars.yandex.net/get-music-content/9/a/%%"},
+                 "counts": {"tracks": 230, "directAlbums": 17}},
+                "stats": {"lastMonthListeners": 1873455},
+                "popularTracks": []}"#,
+        )
+        .unwrap();
+        let info = brief.into_info();
+        assert_eq!(info.id, "41191");
+        assert_eq!(info.name, "Кино");
+        assert_eq!(info.monthly_listeners, Some(1_873_455));
+        assert_eq!(info.likes, Some(512_000));
+        assert_eq!(info.track_count, Some(230));
+        assert_eq!(info.cover_uri.as_deref(), Some("avatars.yandex.net/get-music-content/9/a/%%"));
+
+        let ranked: RawTrackIds = serde_json::from_str(r#"{"tracks": ["3", 1, "2"]}"#).unwrap();
+        let ids: Vec<String> = ranked.tracks.into_iter().map(|id| id.0).collect();
+        assert_eq!(ids, ["3", "1", "2"]);
     }
 
     #[test]

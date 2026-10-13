@@ -1767,6 +1767,129 @@ body:not(.playing) .eq span {
   accent-color: var(--accent);
 }
 
+/* ---------- own files, playlists menu, artist ---------- */
+
+.artist-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.artist.link {
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.artist.link:hover:not(:disabled),
+.now-artist:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.artist.link:disabled {
+  cursor: default;
+}
+
+.now-artist {
+  cursor: pointer;
+}
+
+/* Marks a listener's own imported file: not from Yandex. */
+.own-badge {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-right: 4px;
+  vertical-align: -3px;
+  color: #8fb8ff;
+}
+
+.own-badge .i {
+  width: 14px;
+  height: 14px;
+}
+
+.heart.spacer {
+  visibility: hidden;
+}
+
+.pl-wrap {
+  position: relative;
+}
+
+.pl-menu {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 300px;
+  max-height: 380px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 50%);
+}
+
+.pl-menu-title {
+  font-weight: 700;
+}
+
+.pl-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.pl-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+}
+
+.pl-item:hover:not(:disabled) {
+  background: rgb(255 255 255 / 8%);
+}
+
+.pl-item:disabled {
+  opacity: 0.4;
+}
+
+.pl-new {
+  display: flex;
+  gap: 8px;
+}
+
+.pl-new .field {
+  padding: 8px 10px;
+}
+
+.playlist-art.artist-photo {
+  position: relative;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--surface-3);
+}
+
+.playlist-art.artist-photo img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 /* ---------- toast ---------- */
 
 .toast {

@@ -39,6 +39,8 @@
     <symbol id="i-settings" viewBox="0 0 24 24"><path d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94c0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.47.47 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.47.47 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z" /></symbol>
     <symbol id="i-playnext" viewBox="0 0 24 24"><path d="M3 10h11v2H3zm0-4h11v2H3zm0 8h7v2H3zm13-1v8l6-4z" /></symbol>
     <symbol id="i-user" viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" /></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 14h-3v3a2 2 0 1 1-2-2c.37 0 .7.11 1 .28V11h4v2h-3v3h3zM13 9V3.5L18.5 9H13z" /></symbol>
+    <symbol id="i-playlist-add" viewBox="0 0 24 24"><path d="M14 10H3v2h11v-2zm0-4H3v2h11V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM3 16h7v-2H3v2z" /></symbol>
     <symbol id="i-wave" viewBox="0 0 24 24"><path d="M7 18h2V6H7v12zm4 4h2V2h-2v20zm-8-8h2v-4H3v4zm12 4h2V6h-2v12zm4-8v4h2v-4h-2z" /></symbol>
   </svg>
 
@@ -174,10 +176,42 @@
             <button id="album-queue" class="btn ghost" title="добавить всё в конец очереди">
               <svg class="i"><use href="#i-add" /></svg>В очередь
             </button>
+            <button id="album-delete" class="btn danger hidden" title="удалить этот плейлист с устройства">
+              <svg class="i"><use href="#i-close" /></svg>Удалить плейлист
+            </button>
           </div>
         </div>
       </div>
       <ul id="album-tracks" class="tracks"></ul>
+    </section>
+
+    <!-- An artist: the portrait, how many listen, and their tracks most popular
+         first. Opened by pressing the artist of what is playing. -->
+    <section class="view hidden" data-view="artist">
+      <button type="button" id="artist-back" class="back">
+        <svg class="i flip"><use href="#i-chevron" /></svg>Назад
+      </button>
+      <div class="playlist-head">
+        <div class="playlist-art artist-photo" id="artist-photo"></div>
+        <div class="playlist-info">
+          <div class="eyebrow">Исполнитель</div>
+          <div class="playlist-title" id="artist-name"></div>
+          <div class="now-meta" id="artist-meta"></div>
+          <div class="row">
+            <button id="artist-play" class="round-play" title="играть популярное"><svg class="i"><use href="#i-play" /></svg></button>
+            <button id="artist-next" class="btn ghost" title="поставить сразу после текущего трека">
+              <svg class="i"><use href="#i-playnext" /></svg>Играть следующим
+            </button>
+            <button id="artist-queue" class="btn ghost" title="добавить всё в конец очереди">
+              <svg class="i"><use href="#i-add" /></svg>В очередь
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="section-head">
+        <h2>Популярные треки <span id="artist-count" class="dim"></span></h2>
+      </div>
+      <ul id="artist-tracks" class="tracks"></ul>
     </section>
 
     <!-- The words of what is playing, following the music where Yandex has
@@ -405,9 +439,23 @@
       <div id="cover" class="cover"></div>
       <div class="now-text">
         <div id="title" class="title">—</div>
-        <div id="artist" class="artist"></div>
+        <div class="artist-line">
+          <span id="own-badge" class="own-badge hidden" title="свой файл — не из Яндекс Музыки"><svg class="i"><use href="#i-file" /></svg></span>
+          <button type="button" id="artist" class="artist link" title="открыть страницу исполнителя"></button>
+        </div>
       </div>
       <button id="heart" class="heart" title="Мне нравится"><svg class="i"><use href="#i-heart-outline" /></svg></button>
+      <div class="pl-wrap">
+        <button id="add-pl" class="heart" title="добавить в плейлист"><svg class="i"><use href="#i-playlist-add" /></svg></button>
+        <div id="pl-menu" class="pl-menu hidden" role="menu">
+          <div class="pl-menu-title">Добавить в плейлист</div>
+          <div id="pl-list" class="pl-list"></div>
+          <div class="pl-new">
+            <input id="pl-new-name" class="field" maxlength="80" placeholder="новый плейлист на устройстве" />
+            <button id="pl-new" class="btn primary small">Создать</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="center">

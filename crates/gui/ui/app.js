@@ -108,7 +108,37 @@ const ui = {
   setDir: el("set-dir"),
   setSave: el("set-save"),
   setPath: el("set-path"),
+  albumDelete: el("album-delete"),
+  ownBadge: el("own-badge"),
+  addPl: el("add-pl"),
+  plMenu: el("pl-menu"),
+  plList: el("pl-list"),
+  plNewName: el("pl-new-name"),
+  plNew: el("pl-new"),
+  artistBack: el("artist-back"),
+  artistPhoto: el("artist-photo"),
+  artistName: el("artist-name"),
+  artistMeta: el("artist-meta"),
+  artistPlay: el("artist-play"),
+  artistNext: el("artist-next"),
+  artistQueue: el("artist-queue"),
+  artistTracks: el("artist-tracks"),
+  artistCount: el("artist-count"),
 };
+
+/// The owner a playlist on this device reports; see `playlists.rs`.
+const LOCAL_OWNER = "local";
+
+/// One of the listener's own imported files, not a Yandex track — `import`
+/// names them so.
+function isOwn(track) {
+  return Boolean(track?.track_id?.startsWith("local_"));
+}
+
+/// «1 873 455», the way a Russian reader groups digits.
+function fmtCount(value) {
+  return Number(value).toLocaleString("ru-RU");
+}
 
 /// How much has to be typed before the search runs by itself. Below this, only
 /// Enter searches: two letters match half the catalogue and every keystroke would
@@ -190,6 +220,12 @@ let coverKey = null;
 let playlists = null;
 /// The page the album/playlist view goes back to.
 let albumReturn = "home";
+/// The playlist on the album page, when it is one; `null` for an album.
+let openPlaylistCard = null;
+/// The artist page: its tracks, which request they answer, and where back goes.
+let artistTracks = [];
+let artistToken = 0;
+let beforeArtist = "home";
 /// The words on the lyrics page: whose they are, and the timed lines if any.
 let lyricsFor = null;
 let lyricsLines = [];
@@ -504,6 +540,8 @@ function renderAlbumCards() {
 async function openAlbum(album) {
   hideSuggest();
   albumReturn = "home";
+  openPlaylistCard = null;
+  ui.albumDelete.classList.add("hidden");
   ui.albumEyebrow.textContent = "Альбом";
   const mine = ++albumToken;
   albumTracks = [];
@@ -528,7 +566,10 @@ async function openAlbum(album) {
 /// One of the account's playlists, on the same page an album gets.
 async function openPlaylist(playlist) {
   albumReturn = "library";
-  ui.albumEyebrow.textContent = "Плейлист";
+  openPlaylistCard = playlist;
+  const local = playlist.owner === LOCAL_OWNER;
+  ui.albumDelete.classList.toggle("hidden", !local);
+  ui.albumEyebrow.textContent = local ? "Плейлист на устройстве" : "Плейлист";
   const mine = ++albumToken;
   albumTracks = [];
   ui.albumTitle.textContent = playlist.title;
@@ -559,11 +600,14 @@ function renderAlbumTracks() {
     ui.albumTracks.replaceChildren(emptyRow("здесь нет доступных треков"));
     return;
   }
+  const local = openPlaylistCard?.owner === LOCAL_OWNER;
   ui.albumTracks.replaceChildren(
     ...albumTracks.map((track, index) =>
       trackItem(track, index, {
         current: false,
         onClick: () => playFrom(albumTracks, index),
+        // A playlist on this device is edited here; the account's are not.
+        extra: local ? removeFromPlaylistButton(track) : undefined,
       }),
     ),
   );
@@ -585,6 +629,34 @@ ui.albumNext.addEventListener("click", async () => {
   if (done) toast(`следующим: «${ui.albumTitle.textContent}»`);
 });
 ui.albumBack.addEventListener("click", () => showView(albumReturn));
+
+function removeFromPlaylistButton(track) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "drop";
+  button.append(icon("i-close"));
+  button.title = "убрать из плейлиста";
+  button.addEventListener("click", async () => {
+    const card = openPlaylistCard;
+    if (!card) return;
+    if (!(await attempt("remove_from_playlist", { kind: card.kind, trackId: track.track_id }))) return;
+    albumTracks = albumTracks.filter((one) => one.track_id !== track.track_id);
+    ui.albumMeta.textContent = tracksWord(albumTracks.length);
+    playlists = null;
+    renderAlbumTracks();
+  });
+  return button;
+}
+
+ui.albumDelete.addEventListener("click", async () => {
+  const card = openPlaylistCard;
+  if (!card || !confirm(`Удалить плейлист «${card.title}» с этого устройства?`)) return;
+  if (!(await attempt("delete_playlist", { kind: card.kind }))) return;
+  toast(`плейлист «${card.title}» удалён`);
+  playlists = null;
+  selectTab("playlists");
+  showView("library");
+});
 
 /// What pressing a line of the dropdown does: an album opens, anything else is
 /// searched for.
@@ -640,7 +712,7 @@ function showView(name) {
   }
   // An album page is reached from the home page's search, so that is where the
   // menu says you are.
-  const section = name === "album" ? albumReturn : name;
+  const section = name === "album" ? albumReturn : name === "artist" ? beforeArtist : name;
   if (name !== "lyrics") ui.lyricsBtn.classList.remove("on");
   for (const item of ui.nav.querySelectorAll(".nav-item")) {
     item.classList.toggle("current", item.dataset.view === section);
@@ -748,6 +820,8 @@ function updateHeart() {
   setIcon(ui.heart, liked ? "i-heart" : "i-heart-outline");
   ui.heart.title = liked ? "убрать из «Мне нравится»" : "в «Мне нравится»";
   ui.heart.disabled = !track;
+  ui.heart.classList.toggle("hidden", isOwn(track));
+  ui.addPl.disabled = !track;
 }
 
 function renderQueueAndResults() {
@@ -814,7 +888,14 @@ function trackItem(track, index, { current, onClick, trailing, extra, queueable 
   name.textContent = track.title;
   const by = document.createElement("span");
   by.className = "by";
-  by.textContent = track.artist;
+  if (isOwn(track)) {
+    const badge = document.createElement("span");
+    badge.className = "own-badge";
+    badge.title = "свой файл — не из Яндекс Музыки";
+    badge.append(icon("i-file"));
+    by.append(badge);
+  }
+  by.append(track.artist);
   meta.append(name, by);
 
   const flag = origin(track.track_id);
@@ -835,7 +916,8 @@ function trackItem(track, index, { current, onClick, trailing, extra, queueable 
   // Pressing the row plays it; this adds it to the end without interrupting.
   // Not on the queue's own rows, where every track is already queued.
   if (queueable) item.append(playNextButton(track), queueButton(track));
-  item.append(heartButton(track));
+  // A like is Yandex's; an own file keeps the column, without the button.
+  item.append(isOwn(track) ? heartSpacer() : heartButton(track));
   if (extra) item.append(extra);
   return item;
 }
@@ -874,6 +956,12 @@ function playNextButton(track) {
     if (done) toast(`следующим: ${track.artist} — ${track.title}`);
   });
   return button;
+}
+
+function heartSpacer() {
+  const spacer = document.createElement("span");
+  spacer.className = "heart spacer";
+  return spacer;
 }
 
 /// The heart, drawn from the stored «Мне нравится».
@@ -1003,7 +1091,7 @@ function renderPlaylists() {
     return;
   }
   if (!playlists.length) {
-    ui.playlists.replaceChildren(emptyNote("У аккаунта нет своих плейлистов"));
+    ui.playlists.replaceChildren(emptyNote("Плейлистов пока нет — создайте его кнопкой «в плейлист» у играющего трека"));
     return;
   }
   ui.playlists.replaceChildren(
@@ -1020,7 +1108,10 @@ function renderPlaylists() {
       name.textContent = playlist.title;
       const by = document.createElement("span");
       by.className = "album-by";
-      by.textContent = tracksWord(playlist.track_count);
+      by.textContent =
+        playlist.owner === LOCAL_OWNER
+          ? `на устройстве · ${tracksWord(playlist.track_count)}`
+          : tracksWord(playlist.track_count);
       card.append(art, name, by);
       card.addEventListener("click", () => openPlaylist(playlist));
       return card;
@@ -1217,6 +1308,8 @@ async function refreshLikes() {
 function renderNow(track) {
   ui.title.textContent = track ? track.title : "—";
   ui.artist.textContent = track ? track.artist : "";
+  ui.artist.disabled = !track || isOwn(track);
+  ui.ownBadge.classList.toggle("hidden", !isOwn(track));
   ui.nowTitle.textContent = track ? track.title : "Тишина";
   ui.nowArtist.textContent = track ? track.artist : "поставьте что-нибудь в очередь";
 
@@ -1552,6 +1645,146 @@ ui.setSaveToken.addEventListener("click", async () => {
   ui.setToken.value = "";
   setAccount(true);
   toast(verdict);
+});
+
+// ---------- add to playlist ----------
+
+/// The menu under the playlist button in the player: the playlists to add the
+/// playing track to, and a field for a new one on this device.
+async function openPlaylistMenu() {
+  const track = latest?.track;
+  if (!track) return;
+  ui.plMenu.classList.remove("hidden");
+  ui.plList.replaceChildren(emptyNote("загружаю плейлисты…"));
+  if (playlists === null) {
+    const found = await call("my_playlists");
+    playlists = found ?? [];
+  }
+  renderPlaylistMenu(track);
+}
+
+function renderPlaylistMenu(track) {
+  if (!playlists.length) {
+    ui.plList.replaceChildren(emptyNote("плейлистов пока нет — создайте первый ниже"));
+    return;
+  }
+  ui.plList.replaceChildren(
+    ...playlists.map((playlist) => {
+      const local = playlist.owner === LOCAL_OWNER;
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "pl-item";
+      const name = document.createElement("span");
+      name.textContent = playlist.title;
+      const where = document.createElement("span");
+      where.className = "dim";
+      where.textContent = local ? "на устройстве" : "Яндекс";
+      row.append(name, where);
+      // Yandex takes only its own tracks into its playlists.
+      if (!local && isOwn(track)) {
+        row.disabled = true;
+        row.title = "свой файл можно добавить только в плейлист на устройстве";
+      }
+      row.addEventListener("click", async () => {
+        const message = await call("add_to_playlist", { owner: playlist.owner, kind: playlist.kind, track });
+        if (message === null) return;
+        toast(`${message}: «${playlist.title}»`);
+        closePlaylistMenu();
+        playlists = null;
+      });
+      return row;
+    }),
+  );
+}
+
+function closePlaylistMenu() {
+  ui.plMenu.classList.add("hidden");
+  ui.plNewName.value = "";
+}
+
+ui.addPl.addEventListener("click", (event) => {
+  event.stopPropagation();
+  if (ui.plMenu.classList.contains("hidden")) openPlaylistMenu();
+  else closePlaylistMenu();
+});
+ui.plMenu.addEventListener("click", (event) => event.stopPropagation());
+document.addEventListener("click", () => closePlaylistMenu());
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closePlaylistMenu();
+});
+
+ui.plNew.addEventListener("click", async () => {
+  const track = latest?.track;
+  const title = ui.plNewName.value.trim();
+  if (!track || !title) return;
+  const card = await call("create_playlist", { title, track });
+  if (!card) return;
+  toast(`создан плейлист «${card.title}» с этим треком`);
+  closePlaylistMenu();
+  playlists = null;
+  if (tab === "playlists") renderLibrary();
+});
+ui.plNewName.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") ui.plNew.click();
+});
+
+// ---------- artist ----------
+
+/// The page of whoever sings `track`: the portrait and the numbers at once, the
+/// tracks once Yandex answers.
+async function openArtist(track) {
+  if (!track || isOwn(track)) return;
+  const current = document.querySelector(".view:not(.hidden)")?.dataset.view;
+  if (current && current !== "artist") beforeArtist = current;
+  const mine = ++artistToken;
+  artistTracks = [];
+  ui.artistName.textContent = track.artist;
+  ui.artistMeta.textContent = "";
+  ui.artistCount.textContent = "";
+  ui.artistPhoto.replaceChildren(icon("i-user"));
+  for (const node of [ui.artistPlay, ui.artistNext, ui.artistQueue]) node.disabled = true;
+  ui.artistTracks.replaceChildren(emptyRow("загружаю…"));
+  showView("artist");
+
+  const page = await call("artist_page", { trackId: track.track_id });
+  if (mine !== artistToken) return;
+  if (!page) {
+    ui.artistTracks.replaceChildren(emptyRow("не удалось загрузить страницу исполнителя"));
+    return;
+  }
+  const { artist, tracks } = page;
+  ui.artistName.textContent = artist.name;
+  fillCover(ui.artistPhoto, artist, 400);
+  ui.artistMeta.textContent = [
+    artist.monthly_listeners ? `${fmtCount(artist.monthly_listeners)} слушателей за месяц` : null,
+    artist.likes ? `${fmtCount(artist.likes)} в «Мне нравится»` : null,
+    artist.track_count ? tracksWord(artist.track_count) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  artistTracks = tracks;
+  ui.artistCount.textContent = tracks.length ? `· ${tracks.length}` : "";
+  for (const node of [ui.artistPlay, ui.artistNext, ui.artistQueue]) node.disabled = !tracks.length;
+  ui.artistTracks.replaceChildren(
+    ...(tracks.length
+      ? tracks.map((one, index) =>
+          trackItem(one, index, { current: false, onClick: () => playFrom(artistTracks, index) }),
+        )
+      : [emptyRow("у исполнителя нет доступных треков")]),
+  );
+}
+
+ui.artist.addEventListener("click", () => openArtist(latest?.track));
+ui.nowArtist.addEventListener("click", () => openArtist(latest?.track));
+ui.artistBack.addEventListener("click", () => showView(beforeArtist));
+ui.artistPlay.addEventListener("click", () => playFrom(artistTracks, 0));
+ui.artistNext.addEventListener("click", async () => {
+  const done = await withRoom(() => attempt("play_next", { tracks: artistTracks }));
+  if (done) toast(`следующим: ${ui.artistName.textContent}`);
+});
+ui.artistQueue.addEventListener("click", async () => {
+  const done = await withRoom(() => attempt("queue_tracks", { tracks: artistTracks, start: 0, replace: false }));
+  if (done) toast(`в очереди: ${ui.artistName.textContent}`);
 });
 
 /// Joins a room, or holds it here. The two buttons differ only in `host`.
