@@ -17,6 +17,7 @@ pub mod likes;
 pub mod link;
 pub mod net;
 pub mod playback;
+pub mod playlists;
 pub mod session;
 pub mod share;
 pub mod stream;

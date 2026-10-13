@@ -470,6 +470,10 @@ enum Internal {
         track_id: String,
         ready: Option<(TrackRef, AudioSource, Origin)>,
         stored: bool,
+        /// Yandex will not give this account the track. It is then marked so,
+        /// which is what makes a neighbour's offer of it start a new attempt —
+        /// from the neighbour this time.
+        refused: bool,
     },
     /// One track finished downloading for offline use.
     Downloaded {
@@ -1241,12 +1245,15 @@ impl Engine {
         let track_id = next.track_id.clone();
 
         tokio::spawn(async move {
-            let fetched = fetch_source(&fetch, &next).await.ok();
+            let outcome = fetch_source(&fetch, &next).await;
+            let refused = matches!(outcome, Err(LoadFailure::NotLicensed(_)));
+            let fetched = outcome.ok();
             let stored = fetched.as_ref().is_some_and(|f| f.stored);
             let _ = internal.send(Internal::Prefetched {
                 track_id,
                 ready: fetched.map(|f| (f.track, f.source, f.origin)),
                 stored,
+                refused,
             });
         });
     }
@@ -1401,11 +1408,17 @@ impl Engine {
                 track_id,
                 ready,
                 stored,
+                refused,
             } => {
                 if self.prefetching.as_deref() != Some(track_id.as_str()) {
                     return;
                 }
                 self.prefetching = None;
+                // Not asked of Yandex again; a neighbour offering it clears this,
+                // and the next tick prefetches it from them.
+                if refused {
+                    self.unavailable.insert(track_id.clone());
+                }
                 if stored {
                     self.refresh_cache_view();
                 }

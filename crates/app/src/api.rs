@@ -249,6 +249,51 @@ impl YandexMusic {
         Ok(None)
     }
 
+    /// Adds a track to the end of one of this account's playlists.
+    ///
+    /// Yandex takes a diff against a revision, so the playlist is read first for
+    /// its current one. A track already in it is left alone.
+    pub async fn add_to_playlist(&self, kind: &str, track_id: &str, album_id: Option<&str>) -> Result<bool> {
+        let uid = self.uid().await?;
+        let playlist: PlaylistResponse = self
+            .get_result(&format!("/users/{uid}/playlists/{kind}"), &[])
+            .await
+            .with_context(|| format!("запрос плейлиста {kind}"))?;
+        if playlist
+            .tracks
+            .iter()
+            .filter_map(|entry| entry.track.as_ref())
+            .any(|track| track.id.0 == track_id)
+        {
+            return Ok(false);
+        }
+        // Yandex wants the album with the track; a track that came without one
+        // is looked up.
+        let album_id = match album_id {
+            Some(album) => album.to_string(),
+            None => self
+                .track(track_id)
+                .await?
+                .album_id()
+                .context("у трека нет альбома — Яндекс не примет его в плейлист")?,
+        };
+        let at = playlist.track_count.max(playlist.tracks.len() as u32);
+        let diff = serde_json::json!([{
+            "op": "insert",
+            "at": at,
+            "tracks": [{ "id": track_id, "albumId": album_id }],
+        }])
+        .to_string();
+        let revision = playlist.revision.to_string();
+        self.post_form(
+            &format!("/users/{uid}/playlists/{kind}/change-relative"),
+            &[("diff", diff.as_str()), ("revision", revision.as_str())],
+        )
+        .await
+        .context("Яндекс не добавил трек в плейлист")?;
+        Ok(true)
+    }
+
     /// The account's own «Мне нравится», newest first.
     ///
     /// This is playlist 3 of the account, which answers with whole tracks —
@@ -763,9 +808,16 @@ struct AlbumWithTracks {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlaylistResponse {
     #[serde(default)]
     tracks: Vec<PlaylistEntry>,
+    /// Bumped by Yandex on every change; a change has to name the one it
+    /// applies to.
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    track_count: u32,
 }
 
 /// Playlist entries wrap the track, and omit it when it is unavailable.
