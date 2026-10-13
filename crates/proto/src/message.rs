@@ -159,6 +159,12 @@ pub struct PlaybackState {
     /// random among them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shuffle: bool,
+    /// Set while the room holds a track at its start until every peer has it
+    /// loaded: the id of that wait, which a peer names in
+    /// [`ClientMsg::Ready`]. `playing` is false meanwhile, so a client that
+    /// knows nothing of this simply sits at 0:00 until the room starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<u64>,
 }
 
 /// A mutation any peer may ask the relay to make.
@@ -206,6 +212,15 @@ pub enum ClientMsg {
         /// The listener's chosen name, shown to the rest of the room.
         #[serde(default)]
         name: String,
+        /// This peer reports [`ClientMsg::Ready`], so a new track may wait for
+        /// it. Peers that do not are not waited for.
+        #[serde(default)]
+        reports_ready: bool,
+    },
+    /// The track the room is waiting on is loaded here and can start.
+    Ready {
+        /// The wait being answered: [`PlaybackState::waiting`].
+        barrier: u64,
     },
     /// Changes this peer's name without reconnecting.
     SetName {
@@ -241,6 +256,11 @@ pub enum ServerMsg {
         /// [`ServerMsg::Roster`].
         #[serde(default)]
         you: u64,
+        /// The relay holds new tracks until the room is ready, and wants
+        /// [`ClientMsg::Ready`]. An older relay leaves this out, and is then
+        /// sent no such thing.
+        #[serde(default)]
+        waits_for_ready: bool,
     },
     /// Everybody in the room, by name. Broadcast whenever somebody joins, leaves
     /// or renames themselves.
@@ -343,6 +363,7 @@ mod tests {
             station_unfed: false,
             repeat: RepeatMode::All,
             shuffle: true,
+            waiting: Some(4),
         }
     }
 

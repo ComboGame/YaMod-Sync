@@ -268,6 +268,8 @@ data class Snapshot(
     val shuffle: Boolean = false,
     /** Everybody in the room, this phone included. */
     val listeners: List<Listener> = emptyList(),
+    /** The room holds the track at its start until every device has it loaded. */
+    val waiting: Boolean = false,
 )
 
 /** Either the `ok` payload or the `error` text from a native call. */
@@ -372,6 +374,7 @@ fun JSONObject.toSnapshot(previous: Snapshot? = null) =
         downloadQueue = optInt("download_queue"),
         hosting = if (isNull("hosting")) null else optString("hosting"),
         repeat = optString("repeat", "off"),
+        waiting = optBoolean("waiting"),
         shuffle = optBoolean("shuffle"),
         listeners = optJSONArray("listeners")?.let { array ->
             (0 until array.length()).mapNotNull { index ->

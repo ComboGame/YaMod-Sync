@@ -222,6 +222,8 @@ pub struct Snapshot {
     pub repeat: RepeatMode,
     /// Whether the room's upcoming tracks are shuffled.
     pub shuffle: bool,
+    /// The room is holding the track at its start until everyone has it loaded.
+    pub waiting: bool,
     /// Last thing worth telling the user about.
     pub notice: Option<String>,
 }
@@ -362,6 +364,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         listeners: Vec::new(),
         repeat: RepeatMode::Off,
         shuffle: false,
+        waiting: false,
         notice: None,
     });
 
@@ -392,6 +395,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         streaming: None,
         shares: Vec::new(),
         roster: Vec::new(),
+        reported_barrier: None,
         share_port,
         // True from the start: the room has not been told anything yet, and even
         // an empty cache is worth stating so a peer knows where it stands.
@@ -664,6 +668,8 @@ struct Engine {
     shares: Vec<PeerShare>,
     /// Who is in the room, as the relay last listed them.
     roster: Vec<RosterEntry>,
+    /// The last wait this peer said it was ready for, so it says so once.
+    reported_barrier: Option<u64>,
     /// The port this machine serves its own cache on.
     share_port: Option<u16>,
     /// The cache has changed and the room has not been told yet.
@@ -826,7 +832,12 @@ impl Engine {
                 // Derived from the room, not from this player: a toggle computed
                 // locally would flip the wrong way on a peer that is still
                 // loading, and two peers toggling at once would cancel out.
-                let playing = self.remote.as_ref().is_some_and(|state| state.playing);
+                // A track waiting for the room counts as playing: pausing it is
+                // what the listener means, and resuming would change nothing.
+                let playing = self
+                    .remote
+                    .as_ref()
+                    .is_some_and(|state| state.playing || state.waiting.is_some());
                 self.ask(if playing {
                     ymsync_proto::Command::Pause
                 } else {
@@ -1770,7 +1781,39 @@ impl Engine {
         // After the prefetch, deliberately: the next track the room will play
         // matters more than filling the offline library.
         self.pump_downloads(internal);
+        self.report_ready();
         self.correct();
+    }
+
+    /// Tells the relay this peer can start the track the room is holding.
+    ///
+    /// Ready means the player holds the track — whole, or enough of it to play
+    /// while the rest arrives. A track this peer will not play at all (its
+    /// account cannot have it, or it is set aside for now) counts as ready too:
+    /// the room should not wait for a peer that is going to sit it out.
+    fn report_ready(&mut self) {
+        if !self.link.waits_for_ready() {
+            return;
+        }
+        let Some(remote) = self.remote.as_ref() else {
+            return;
+        };
+        let (Some(barrier), Some(track)) = (remote.waiting, remote.track.as_ref()) else {
+            return;
+        };
+        if self.reported_barrier == Some(barrier) {
+            return;
+        }
+        let id = track.track_id.as_str();
+        let staged = self.loading.is_none() && self.player.current_track_id().as_deref() == Some(id);
+        if !(staged || self.unavailable.contains(id) || self.set_aside(id)) {
+            return;
+        }
+        if self.link.report_ready(barrier) {
+            self.reported_barrier = Some(barrier);
+        } else {
+            self.connected = false;
+        }
     }
 
     /// Tops the room's queue up while this peer is feeding a station.
@@ -1946,6 +1989,7 @@ impl Engine {
                 .collect(),
             repeat: self.remote.as_ref().map_or(RepeatMode::Off, |state| state.repeat),
             shuffle: self.remote.as_ref().is_some_and(|state| state.shuffle),
+            waiting: self.remote.as_ref().is_some_and(|state| state.waiting.is_some()),
             notice: self.notice.clone(),
         });
     }

@@ -84,6 +84,9 @@ pub struct Link {
     peers_at_join: usize,
     /// The relay's id for this peer, for finding ourselves in the room's list.
     you: u64,
+    /// The relay holds new tracks until the room is ready, and wants to hear
+    /// when this peer is.
+    waits_for_ready: bool,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -114,6 +117,7 @@ impl Link {
                 token: room_token.to_string(),
                 client: client_name(),
                 name: name.to_string(),
+                reports_ready: true,
             },
         )
         .await?;
@@ -126,10 +130,14 @@ impl Link {
         // feeder has left never changes it again.
         let mut replay: Vec<ServerMsg> = Vec::new();
 
-        let (peers_at_join, you) = loop {
+        let (peers_at_join, you, waits_for_ready) = loop {
             match next_server_msg(&mut read, HANDSHAKE_TIMEOUT).await? {
                 ServerMsg::Welcome {
-                    protocol, peers, you, ..
+                    protocol,
+                    peers,
+                    you,
+                    waits_for_ready,
+                    ..
                 } => {
                     if protocol != PROTOCOL_VERSION {
                         bail!(
@@ -137,7 +145,7 @@ impl Link {
                              на {PROTOCOL_VERSION}: обновите обе стороны"
                         );
                     }
-                    break (peers, you);
+                    break (peers, you, waits_for_ready);
                 }
                 ServerMsg::Error { code, message } => {
                     bail!("релей отказал в подключении ({code}): {message}")
@@ -222,6 +230,7 @@ impl Link {
                 clock,
                 peers_at_join,
                 you,
+                waits_for_ready,
                 tasks: vec![writer, reader, prober],
             },
             event_rx,
@@ -239,6 +248,17 @@ impl Link {
     /// The relay's id for this peer.
     pub fn you(&self) -> u64 {
         self.you
+    }
+
+    /// Whether the relay waits for [`Link::report_ready`] before starting a track.
+    pub fn waits_for_ready(&self) -> bool {
+        self.waits_for_ready
+    }
+
+    /// Tells the relay the track it is holding is loaded here.
+    #[must_use]
+    pub fn report_ready(&self, barrier: u64) -> bool {
+        self.out.send(ClientMsg::Ready { barrier }).is_ok()
     }
 
     /// Changes the name the room shows for this peer, without reconnecting.

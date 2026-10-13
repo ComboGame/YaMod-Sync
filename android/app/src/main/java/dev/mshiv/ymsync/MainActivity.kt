@@ -1247,6 +1247,7 @@ private fun queueNote(snapshot: Snapshot?): String? {
     return buildList {
         if (snapshot.queue.isNotEmpty()) add("${snapshot.index + 1} из ${snapshot.queue.size}")
         if (snapshot.loading) add("загрузка…")
+        else if (snapshot.waiting) add("ждём, пока трек загрузится у всех…")
         snapshot.notice?.let { add(it) }
         if (snapshot.downloading != null) {
             add(if (snapshot.downloadQueue > 0) "скачиваю, ещё ${snapshot.downloadQueue}" else "скачиваю")
@@ -2227,7 +2228,11 @@ private fun FullPlayer(room: Room, onClose: () -> Unit, onQueue: () -> Unit, onL
         )
         Row(Modifier.fillMaxWidth()) {
             Text(
-                if (snapshot.loading) "загрузка…" else formatMs(if (dragging) (dragged * duration).toLong() else position),
+                when {
+                    snapshot.loading -> "загрузка…"
+                    snapshot.waiting -> "ждём, пока трек загрузится у всех…"
+                    else -> formatMs(if (dragging) (dragged * duration).toLong() else position)
+                },
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = 12.sp,
             )

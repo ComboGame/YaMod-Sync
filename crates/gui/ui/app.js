@@ -1242,7 +1242,12 @@ function render(snapshot) {
   followLyrics(snapshot);
 
   const place = snapshot.queue.length ? `${snapshot.index + 1} из ${snapshot.queue.length}` : "";
-  const note = snapshot.loading ? "загрузка…" : (snapshot.notice || "");
+  // Loaded here but held at the start until every device has it too.
+  const note = snapshot.loading
+    ? "загрузка…"
+    : snapshot.waiting
+      ? "ждём, пока трек загрузится у всех…"
+      : (snapshot.notice || "");
   const fetching = snapshot.downloading
     ? snapshot.download_queue > 0
       ? `скачиваю, ещё ${snapshot.download_queue}`
@@ -1253,7 +1258,7 @@ function render(snapshot) {
 
   document.body.classList.toggle("playing", Boolean(snapshot.playing));
   setIcon(ui.toggle, snapshot.playing ? "i-pause" : "i-play");
-  ui.position.textContent = snapshot.loading ? "…" : fmt(snapshot.position_ms);
+  ui.position.textContent = snapshot.loading || snapshot.waiting ? "…" : fmt(snapshot.position_ms);
   ui.duration.textContent = fmt(snapshot.duration_ms);
   if (!dragging) {
     ui.seek.value = snapshot.duration_ms

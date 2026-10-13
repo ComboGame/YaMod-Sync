@@ -28,7 +28,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,6 +79,15 @@ const MAX_SHARED: usize = 10_000;
 /// up to this late — well inside the correction threshold, and identical for
 /// every peer, since they all take the new anchor from the same snapshot.
 const ADVANCE_TICK: Duration = Duration::from_millis(100);
+
+/// The longest a new track waits for every peer to have it loaded. A peer that
+/// takes longer — a phone on a bad network, an account that cannot get the
+/// track — is left to catch up, rather than holding the whole room in silence.
+const READY_TIMEOUT_MS: i64 = 15_000;
+
+/// How far ahead of the release a track's clock starts, so the frame saying
+/// «go» reaches every peer before the music is meant to begin.
+const START_LEAD_MS: i64 = 300;
 
 /// How long a room with nobody in it keeps its queue.
 ///
@@ -434,6 +443,23 @@ struct RoomState {
     /// For shuffling. A plain xorshift: the order only has to look random to a
     /// listener, and a dependency for that would be out of all proportion.
     rng: u64,
+    /// Peers that report when a track is loaded, and so can be waited for.
+    /// Older clients are not in it: waiting for them would always time out.
+    reporting: HashSet<u64>,
+    /// A new track held at its start until the peers in it have it loaded.
+    barrier: Option<Barrier>,
+    /// The id the next barrier gets; never reused, so a late `Ready` for an
+    /// earlier track cannot release a later one.
+    next_barrier: u64,
+}
+
+/// A track held at 0:00 until everybody can play it.
+struct Barrier {
+    id: u64,
+    /// Who has yet to say the track is loaded.
+    pending: HashSet<u64>,
+    /// When the room starts regardless; see [`READY_TIMEOUT_MS`].
+    deadline_ms: i64,
 }
 
 impl RoomState {
@@ -479,6 +505,7 @@ impl RoomState {
             station_unfed: matches!(&self.station, Some((_, None))),
             repeat: self.repeat,
             shuffle: self.shuffle,
+            waiting: self.barrier.as_ref().map(|barrier| barrier.id),
         }
     }
 
@@ -505,11 +532,78 @@ impl RoomState {
                 .is_some_and(|duration| self.position_ms >= duration)
     }
 
+    /// Puts the room on a track's start. With peers that report readiness the
+    /// track waits for them — starting the clock straight away made a peer that
+    /// was still downloading come in four seconds late, and the room with it.
     fn start_at(&mut self, index: usize, now: i64) {
         self.index = index;
         self.position_ms = 0;
-        self.playing = true;
         self.at_server_ms = now;
+        if self.reporting.is_empty() {
+            self.barrier = None;
+            self.playing = true;
+            return;
+        }
+        self.next_barrier += 1;
+        self.barrier = Some(Barrier {
+            id: self.next_barrier,
+            pending: self.reporting.clone(),
+            deadline_ms: now + READY_TIMEOUT_MS,
+        });
+        self.playing = false;
+    }
+
+    /// Starts the held track. The clock begins a moment ahead of `now`, so the
+    /// frame saying so is everywhere before the first note.
+    fn release(&mut self, now: i64) {
+        self.barrier = None;
+        self.playing = true;
+        self.at_server_ms = now + START_LEAD_MS;
+        self.seq += 1;
+    }
+
+    /// A peer has the held track loaded. Answers whether that started it.
+    fn ready(&mut self, peer: u64, barrier: u64, now: i64) -> bool {
+        let Some(waiting) = self.barrier.as_mut() else {
+            return false;
+        };
+        if waiting.id != barrier {
+            return false;
+        }
+        waiting.pending.remove(&peer);
+        if waiting.pending.is_empty() {
+            self.release(now);
+            return true;
+        }
+        false
+    }
+
+    /// Starts the held track if it has waited long enough.
+    fn expire_barrier(&mut self, now: i64) -> bool {
+        if self.barrier.as_ref().is_some_and(|barrier| now >= barrier.deadline_ms) {
+            self.release(now);
+            return true;
+        }
+        false
+    }
+
+    /// A peer that reports readiness joined.
+    fn reporter_joined(&mut self, peer: u64) {
+        self.reporting.insert(peer);
+    }
+
+    /// A peer left; nobody waits for it any more. Answers whether that started
+    /// the held track.
+    fn peer_left(&mut self, peer: u64, now: i64) -> bool {
+        self.reporting.remove(&peer);
+        let Some(waiting) = self.barrier.as_mut() else {
+            return false;
+        };
+        if waiting.pending.remove(&peer) && waiting.pending.is_empty() {
+            self.release(now);
+            return true;
+        }
+        false
     }
 
     /// Advances when the current track has played to its end. Returns whether
@@ -673,6 +767,12 @@ impl RoomState {
                 Changed::STATE
             }
             Command::Pause => {
+                // Pausing a track that is waiting to start keeps it at its start,
+                // paused, instead of letting it begin once everyone is ready.
+                if self.barrier.take().is_some() {
+                    self.at_server_ms = now;
+                    return Ok(self.bump(Changed::STATE));
+                }
                 if !self.playing {
                     return Ok(Changed::NOTHING);
                 }
@@ -682,7 +782,8 @@ impl RoomState {
                 Changed::STATE
             }
             Command::Resume => {
-                if self.playing {
+                // Already about to play: it starts when everyone is ready.
+                if self.playing || self.barrier.is_some() {
                     return Ok(Changed::NOTHING);
                 }
                 if self.queue.is_empty() {
@@ -859,6 +960,10 @@ async fn advance_ended_tracks(rooms: Rooms, mut shutdown: watch::Receiver<bool>)
                 debug!(room = %name, index = room.state.index, playing = room.state.playing, "track ended");
                 room.publish(Changed::STATE);
             }
+            if room.state.expire_barrier(now) {
+                debug!(room = %name, "not everyone was ready in time; starting anyway");
+                room.publish(Changed::STATE);
+            }
         }
 
         guard.retain(|name, room| {
@@ -925,13 +1030,14 @@ async fn session(
         Ok(Some(msg)) => msg,
     };
 
-    let (room_name, client, name) = match hello {
+    let (room_name, client, name, reports_ready) = match hello {
         ClientMsg::Hello {
             protocol,
             room,
             token: given,
             client,
             name,
+            reports_ready,
         } => {
             if protocol != PROTOCOL_VERSION {
                 reject(
@@ -950,7 +1056,7 @@ async fn session(
                 reject(tx, "bad_room", "room must be 1..=64 characters");
                 return Ok(());
             }
-            (room, client, clean_name(&name))
+            (room, client, clean_name(&name), reports_ready)
         }
         _ => {
             reject(tx, "expected_hello", "first message must be hello");
@@ -973,6 +1079,11 @@ async fn session(
         );
         // Someone is listening again, so the room is no longer up for reaping.
         room.empty_since = None;
+        // Waited for from the next track on; whatever is being held right now
+        // started before this peer was here.
+        if reports_ready {
+            room.state.reporter_joined(id);
+        }
         let peers = room.peers.len();
 
         for (other_id, peer) in &room.peers {
@@ -989,6 +1100,7 @@ async fn session(
             server_ms: unix_ms(),
             peers,
             you: id,
+            waits_for_ready: true,
         }));
         // Everybody, the newcomer included, gets the list with the newcomer in it.
         room.publish_roster();
@@ -1025,6 +1137,8 @@ async fn session(
             .peers
             .remove(&id)
             .is_some_and(|peer| peer.share.is_some());
+        // Nobody waits for a peer that is gone.
+        let released = room.state.peer_left(id, unix_ms());
 
         // The wave outlives its feeder. Dropping the claim outright used to mean
         // the room played out what was queued and then sat in silence for good —
@@ -1049,6 +1163,9 @@ async fn session(
             peers,
         });
         room.publish_roster();
+        if released {
+            room.publish(Changed::STATE);
+        }
         if orphaned_station {
             room.publish(Changed::STATE);
         }
@@ -1164,6 +1281,16 @@ async fn pump(
                 );
                 peer.share = offer;
                 room.publish_shares();
+            }
+            ClientMsg::Ready { barrier } => {
+                let mut guard = rooms.lock().await;
+                let Some(room) = guard.get_mut(room_name) else {
+                    continue;
+                };
+                if room.state.ready(id, barrier, unix_ms()) {
+                    debug!(room = %room_name, "everyone is ready; starting");
+                    room.publish(Changed::STATE);
+                }
             }
             ClientMsg::SetName { name } => {
                 let name = clean_name(&name);
@@ -1530,6 +1657,96 @@ mod tests {
         // Not all twenty lined up at the end, as an ordinary enqueue would.
         let tail: Vec<&str> = ids(&state)[3..].to_vec();
         assert!(tail.iter().any(|id| !id.starts_with('n')) || ids(&state)[1..3].iter().any(|id| id.starts_with('n')));
+    }
+
+    /// Two reporting peers, 1 and 2, and a queue of two tracks.
+    fn room_waiting_for_two() -> RoomState {
+        let mut state = RoomState::default();
+        state.reporter_joined(1);
+        state.reporter_joined(2);
+        state
+            .apply(
+                Command::SetQueue {
+                    tracks: vec![track("1", 10_000), track("2", 20_000)],
+                    start: 0,
+                },
+                1,
+                1_000,
+            )
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn a_new_track_waits_until_everyone_has_it() {
+        let mut state = room_waiting_for_two();
+        let barrier = state.snapshot().waiting.expect("held at the start");
+        assert!(!state.playing, "the clock does not run while anyone is loading");
+        // However long the wait, the track has not moved on.
+        assert_eq!(state.derived_position_ms(9_000), 0);
+        assert!(!state.advance_if_ended(30_000));
+
+        assert!(!state.ready(1, barrier, 5_000), "one of two is not everyone");
+        let seq = state.seq;
+        assert!(state.ready(2, barrier, 6_000));
+        assert!(state.playing);
+        assert_eq!(state.snapshot().waiting, None);
+        assert_eq!(state.at_server_ms, 6_000 + START_LEAD_MS, "starts a moment ahead");
+        assert_eq!(state.derived_position_ms(6_100), 0, "still at the top during the lead");
+        assert!(state.seq > seq, "peers must see the start as a newer state");
+    }
+
+    #[test]
+    fn a_ready_for_an_earlier_track_releases_nothing() {
+        let mut state = room_waiting_for_two();
+        let first = state.snapshot().waiting.unwrap();
+        state.apply(Command::Next, 1, 2_000).unwrap();
+        let second = state.snapshot().waiting.unwrap();
+        assert_ne!(first, second);
+        state.ready(1, first, 3_000);
+        state.ready(2, first, 3_000);
+        assert!(!state.playing);
+        assert_eq!(state.snapshot().waiting, Some(second));
+    }
+
+    #[test]
+    fn a_peer_that_leaves_is_not_waited_for() {
+        let mut state = room_waiting_for_two();
+        let barrier = state.snapshot().waiting.unwrap();
+        state.ready(1, barrier, 2_000);
+        assert!(state.peer_left(2, 3_000));
+        assert!(state.playing);
+    }
+
+    #[test]
+    fn a_slow_peer_is_waited_for_only_so_long() {
+        let mut state = room_waiting_for_two();
+        assert!(!state.expire_barrier(1_000 + READY_TIMEOUT_MS - 1));
+        assert!(state.expire_barrier(1_000 + READY_TIMEOUT_MS));
+        assert!(state.playing);
+    }
+
+    #[test]
+    fn pausing_a_waiting_track_keeps_it_paused_at_the_start() {
+        let mut state = room_waiting_for_two();
+        let barrier = state.snapshot().waiting.unwrap();
+        state.apply(Command::Pause, 1, 2_000).unwrap();
+        assert_eq!(state.snapshot().waiting, None);
+        // Readiness arriving afterwards must not start it behind the pause.
+        assert!(!state.ready(1, barrier, 3_000));
+        assert!(!state.ready(2, barrier, 3_000));
+        assert!(!state.playing);
+        assert_eq!(state.position_ms, 0);
+        // And resuming during a wait is no change at all.
+        state.apply(Command::Next, 1, 4_000).unwrap();
+        assert_eq!(state.apply(Command::Resume, 1, 4_500), Ok(Changed::NOTHING));
+    }
+
+    #[test]
+    fn a_room_of_older_clients_starts_at_once() {
+        let state = room_with_two_tracks(0);
+        assert!(state.playing);
+        assert_eq!(state.snapshot().waiting, None);
     }
 
     #[test]

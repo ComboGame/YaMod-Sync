@@ -72,6 +72,10 @@ impl Relay {
     }
 
     async fn join_as(&self, token: &str, name: &str) -> Ws {
+        self.join_full(token, name, false).await
+    }
+
+    async fn join_full(&self, token: &str, name: &str, reports_ready: bool) -> Ws {
         let (mut ws, _) = tokio_tungstenite::connect_async(&self.url)
             .await
             .expect("connect to the relay");
@@ -83,6 +87,7 @@ impl Relay {
                 token: token.to_string(),
                 client: "integration".to_string(),
                 name: name.to_string(),
+                reports_ready,
             },
         )
         .await;
@@ -243,6 +248,43 @@ async fn everybody_sees_who_is_in_the_room_and_a_rename() {
     assert_eq!(recv_roster(&mut anna).await, vec![(anna_id, "Аня".to_string())]);
 }
 
+/// The next state frame, skipping everything else.
+async fn recv_state(ws: &mut Ws) -> ymsync_proto::PlaybackState {
+    loop {
+        if let ServerMsg::State { state } = recv(ws).await {
+            return state;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_track_starts_only_once_every_peer_has_it_loaded() {
+    let relay = Relay::start().await;
+    let mut one = relay.join_full(TOKEN, "один", true).await;
+    match recv_any(&mut one).await {
+        ServerMsg::Welcome { waits_for_ready, .. } => assert!(waits_for_ready),
+        other => panic!("expected a welcome, got {other:?}"),
+    }
+    let mut two = relay.join_full(TOKEN, "два", true).await;
+
+    command(&mut one, set_queue(&["1", "2"])).await;
+    let held = recv_state(&mut one).await;
+    assert!(!held.playing, "nobody has loaded it yet");
+    let barrier = held.waiting.expect("the track waits for the room");
+    assert_eq!(recv_state(&mut two).await.waiting, Some(barrier));
+
+    send(&mut one, &ClientMsg::Ready { barrier }).await;
+    // One of two is not everyone: nothing goes out yet.
+    assert_quiet(&mut one, 7).await;
+
+    send(&mut two, &ClientMsg::Ready { barrier }).await;
+    let started = recv_state(&mut one).await;
+    assert!(started.playing);
+    assert_eq!(started.waiting, None);
+    assert_eq!(started.position_ms, 0, "from the very start");
+    assert!(started.seq > held.seq);
+}
+
 #[tokio::test]
 async fn a_wrong_token_is_rejected() {
     let relay = Relay::start().await;
@@ -268,6 +310,7 @@ async fn a_protocol_mismatch_is_reported() {
             token: TOKEN.to_string(),
             client: "integration".to_string(),
             name: String::new(),
+            reports_ready: false,
         },
     )
     .await;
@@ -795,6 +838,7 @@ async fn an_embedded_relay_serves_an_ordinary_client() {
             token: TOKEN.to_string(),
             client: "integration".to_string(),
             name: String::new(),
+            reports_ready: false,
         },
     )
     .await;

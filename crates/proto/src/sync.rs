@@ -119,6 +119,7 @@ mod tests {
             station_unfed: false,
             repeat: Default::default(),
             shuffle: false,
+            waiting: None,
         }
     }
 
