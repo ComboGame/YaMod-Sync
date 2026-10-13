@@ -433,10 +433,16 @@ async fn every_accepted_command_moves_the_sequence_on() {
 
     // Alternating peers, to show they share one counter rather than each having
     // their own.
-    command(&mut two, Command::Pause).await;
-    command(&mut one, Command::Resume).await;
-
+    // One after the other: sent together from two sockets, the resume could
+    // overtake the pause, find the room already playing and change nothing.
     let mut seen = Vec::new();
+    command(&mut two, Command::Pause).await;
+    while seen.is_empty() {
+        if let ServerMsg::State { state } = recv_ignoring_peers(&mut one).await {
+            seen.push(state.seq);
+        }
+    }
+    command(&mut one, Command::Resume).await;
     while seen.len() < 2 {
         if let ServerMsg::State { state } = recv_ignoring_peers(&mut one).await {
             seen.push(state.seq);
