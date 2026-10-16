@@ -5876,7 +5876,7 @@ dependencies = [
 
 [[package]]
 name = "ymsync"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5907,7 +5907,7 @@ dependencies = [
 
 [[package]]
 name = "ymsync-android"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5922,7 +5922,7 @@ dependencies = [
 
 [[package]]
 name = "ymsync-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "rfd",
@@ -5940,7 +5940,7 @@ dependencies = [
 
 [[package]]
 name = "ymsync-proto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5948,7 +5948,7 @@ dependencies = [
 
 [[package]]
 name = "ymsync-relay"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
