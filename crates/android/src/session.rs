@@ -33,6 +33,8 @@ pub enum Request {
     StopWave,
     /// Keeps music on this device: the whole queue, or just what is playing.
     Download { queue: bool },
+    /// Keeps these particular tracks on this device — «Мне нравится», say.
+    DownloadTracks { tracks: Vec<TrackRef> },
     /// Forgets everything still waiting to be downloaded.
     CancelDownloads,
     /// Deletes one track from this device.
@@ -74,6 +76,7 @@ impl Request {
             Request::Like { track, liked } => Command::Like { track, liked },
             Request::RefreshLikes => Command::RefreshLikes,
             Request::PlayNext { tracks } => Command::PlayNext { tracks },
+            Request::DownloadTracks { tracks } => Command::Download { tracks },
             Request::Repeat { mode } => Command::SetRepeat(mode),
             Request::Shuffle { on } => Command::SetShuffle(on),
             Request::Name { name } => Command::SetName(name),

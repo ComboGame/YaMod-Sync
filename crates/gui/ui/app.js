@@ -44,6 +44,7 @@ const ui = {
   libQueue: el("lib-queue"),
   libRefresh: el("lib-refresh"),
   libImport: el("lib-import"),
+  libDownload: el("lib-download"),
   libArt: el("lib-art"),
   libTitle: el("lib-title"),
   tabs: el("tabs"),
@@ -805,6 +806,13 @@ function updateLibraryButtons() {
   const usable = visibleTracks().length > 0;
   ui.libPlay.disabled = !usable;
   ui.libQueue.disabled = !usable;
+  // «Мне нравится» is the one view here that is not already on this disk.
+  const missing = tab === "likes" ? likes.filter((track) => !cachedIds.has(track.track_id)).length : 0;
+  ui.libDownload.classList.toggle("hidden", tab !== "likes");
+  ui.libDownload.disabled = missing === 0;
+  ui.libDownload.title = missing
+    ? `скачать на этот компьютер: ${tracksWord(missing)}`
+    : "всё из «Мне нравится» уже скачано";
   ui.libRefresh.title =
     tab === "likes"
       ? "перечитать «Мне нравится» с Яндекса"
@@ -2047,6 +2055,17 @@ ui.dlCancel.addEventListener("click", () => call("cancel_downloads"));
 // instead, which is the same act with a different list.
 ui.libPlay.addEventListener("click", () => queueTracks(visibleTracks(), true));
 ui.libQueue.addEventListener("click", () => queueTracks(visibleTracks()));
+
+// Everything liked that is not on this disk yet, queued behind playback one by
+// one. Downloading goes through the engine, so a room is raised if there is none.
+ui.libDownload.addEventListener("click", async () => {
+  const missing = likes.filter((track) => !cachedIds.has(track.track_id));
+  if (!missing.length) return;
+  ui.libDownload.disabled = true;
+  const done = await withRoom(() => attempt("download", { tracks: missing }));
+  if (done) toast(`скачиваю «Мне нравится»: ${tracksWord(missing.length)} — ход загрузки на странице очереди`);
+  updateLibraryButtons();
+});
 
 // Local files, added to this device's downloads. The picker is the system's own,
 // so the paths never pass through this page.

@@ -1463,6 +1463,17 @@ private fun LibraryScreen(
                     GhostButton("В очередь", AppIcons.Add, enabled = room.canDrive && shown.isNotEmpty()) {
                         room.enqueue(shown)
                     }
+                    // «Мне нравится» is the one view here not already on this phone.
+                    if (tab == LibraryTab.LIKES) {
+                        val cached = room.snapshot?.cached ?: emptySet()
+                        val missing = likedTracks.filter { it.trackId !in cached }
+                        GhostButton("Скачать", AppIcons.Download, enabled = room.canDrive && missing.isNotEmpty()) {
+                            room.scope.launch {
+                                val problem = Commands.send("download_tracks") { put("tracks", missing.toJsonArray()) }
+                                SyncHolder.say(problem ?: "скачиваю «Мне нравится»: ${tracksWord(missing.size)}")
+                            }
+                        }
+                    }
                     ImportButton(room, onChanged)
                 } else {
                     IconButton(onClick = { playlists = null; playlistsAsked++ }, enabled = room.canDrive) {
