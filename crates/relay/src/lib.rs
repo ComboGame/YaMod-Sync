@@ -607,6 +607,25 @@ impl RoomState {
         self.playing = false;
     }
 
+    /// Puts the room on a track's start the moment the previous one ended, with
+    /// no wait.
+    ///
+    /// For a track change nobody asked for. Every player was on the previous
+    /// track, in step, and the app's own player moves on to the next one by
+    /// itself as that one ends — so everybody already plays it, from the same
+    /// moment. Holding it for «ready» here only let the players run ahead of a
+    /// room that had stopped its clock, which was the two seconds of drift and
+    /// the jump back heard after every natural track change. A peer that does
+    /// have to load the track comes in a little late and is pulled into place,
+    /// the way any latecomer is.
+    fn continue_at(&mut self, index: usize, ended_at: i64) {
+        self.index = index;
+        self.position_ms = 0;
+        self.at_server_ms = ended_at;
+        self.barrier = None;
+        self.playing = true;
+    }
+
     /// Starts the held track. The clock begins a moment ahead of `now`, so the
     /// frame saying so is everywhere before the first note.
     fn release(&mut self, now: i64) {
@@ -677,17 +696,20 @@ impl RoomState {
         if self.derived_position_ms(now) < duration {
             return false;
         }
+        // When the track actually ended, not when this tick noticed: the next one
+        // started then on every player, and the ticker is up to a tick late.
+        let ended_at = (self.at_server_ms + duration.saturating_sub(self.position_ms) as i64).min(now);
 
         if self.repeat == RepeatMode::One {
             // The same track from the top, until somebody skips it.
-            self.start_at(self.index, now);
+            self.continue_at(self.index, ended_at);
         } else if self.index + 1 < self.queue.len() {
-            self.start_at(self.index + 1, now);
+            self.continue_at(self.index + 1, ended_at);
         } else if self.repeat == RepeatMode::All && !self.queue.is_empty() {
             // Round again, in the same order — shuffled or not. Reshuffling here
             // would change the queue from the ticker, which only ever speaks the
             // playhead; turning shuffle off and on gives a new order.
-            self.start_at(0, now);
+            self.continue_at(0, ended_at);
         } else {
             // Stop on the last track rather than past it, so a station's next
             // batch has somewhere to take over from.
@@ -1591,6 +1613,54 @@ mod tests {
         assert_eq!(state.index, 1);
         assert_eq!(state.position_ms, 0);
         assert!(state.playing);
+    }
+
+    /// Every player already moves on by itself as a track ends: holding the next
+    /// one for «ready» only let them run ahead of a stopped room clock.
+    #[test]
+    fn a_track_that_ends_by_itself_runs_into_the_next_without_a_wait() {
+        let mut state = room_waiting_for_two();
+        let barrier = state.snapshot().waiting.unwrap();
+        state.ready(1, barrier, 1_200);
+        state.ready(2, barrier, 1_300);
+        // Track «1» started at 1 300 + the lead and lasts 10 s; the ticker only
+        // notices 70 ms after it ended.
+        let ended = 1_300 + START_LEAD_MS + 10_000;
+        let seq = state.seq;
+        assert!(state.advance_if_ended(ended + 70));
+        assert_eq!(state.index, 1);
+        assert_eq!(state.snapshot().waiting, None, "nobody is waited for");
+        assert!(state.playing);
+        assert_eq!(state.at_server_ms, ended, "anchored where the last track ended");
+        assert_eq!(state.derived_position_ms(ended + 70), 70);
+        assert!(state.seq > seq);
+    }
+
+    /// A change somebody asked for still gathers everyone first: the players are
+    /// all elsewhere and each has to load the track.
+    #[test]
+    fn a_skip_still_waits_for_everyone() {
+        let mut state = room_waiting_for_two();
+        let barrier = state.snapshot().waiting.unwrap();
+        state.ready(1, barrier, 1_200);
+        state.ready(2, barrier, 1_300);
+        state.apply(Command::Next, 2, 3_000).unwrap();
+        assert!(state.snapshot().waiting.is_some());
+        assert!(!state.playing);
+    }
+
+    #[test]
+    fn repeat_one_runs_into_the_same_track_without_a_wait() {
+        let mut state = room_waiting_for_two();
+        state.apply(Command::SetRepeat { mode: RepeatMode::One }, 1, 1_000).unwrap();
+        let barrier = state.snapshot().waiting.unwrap();
+        state.ready(1, barrier, 1_000);
+        state.ready(2, barrier, 1_000);
+        let ended = 1_000 + START_LEAD_MS + 10_000;
+        assert!(state.advance_if_ended(ended + 50));
+        assert_eq!(state.index, 0);
+        assert_eq!(state.snapshot().waiting, None);
+        assert_eq!(state.at_server_ms, ended);
     }
 
     #[test]
