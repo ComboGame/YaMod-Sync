@@ -33,7 +33,7 @@ export function FontChanger() {
             <SelectTrigger className="w-44 text-foreground">
               <SelectValue placeholder="Выбрать шрифт" />
             </SelectTrigger>
-            <SelectContent className="z-[99999]">
+            <SelectContent>
               {availableFonts.map((name) => (
                 <SelectItem key={name} value={name}>
                   {name}

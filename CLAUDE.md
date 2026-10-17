@@ -111,6 +111,12 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
   `station_unfed`, в панели — «Продолжить со своего аккаунта» (новый `PlayWave` с теми же сидами).
 - `PlayWave` с сидами волны, которую этот участник уже кормит, не открывает новую сессию и не заменяет
   очередь: только продолжает, если комната на паузе (кнопка «Моя волна» в приложении, нажатая ещё раз).
+- У каждой станции своё поколение (`Station::generation`): ответ на запрос треков прежней волны (режим
+  переключили, пока он шёл) отбрасывается. Иначе пачка старого режима заменяла очередь, а новая дописывалась.
+- Волна, которую кормит другой участник и он здесь, — его: `set_queue`, `enqueue`, `play_next`, `index`,
+  `shuffle`, новая волна от остальных отклоняются (релей — `station_owned`, ядро — `wave_led_by_another`,
+  мод — `controller.ts::waveOwner` + `OWNER_ONLY`, колесо на главной неактивно). Пауза, перемотка, пропуск —
+  общие. Ушёл кормящий (`station_unfed`) — волна снова общая.
 
 ### Мост ↔ мод (`crates/bridge/src/protocol.rs`)
 
@@ -171,6 +177,14 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
 - Пока в комнате, фоновый троттлинг окна выключен (`webContents.setBackgroundThrottling(false)`), иначе
   таймеры свёрнутого окна почти встают и синхрон разваливается.
 - Скрипт мода выполняется до появления `document.body` — ничего не читать из DOM на верхнем уровне модуля.
+- Буквы — горячие клавиши клиента (k, l, j, n, m, …); событие из shadow-корня он не узнаёт как ввод и глотал
+  буквы в полях мода. `lib/shadow.tsx::guardModInputs` останавливает клавиши из полей мода на window
+  (capture), кроме Escape и Tab.
+- Очередь комнаты в плеере — контекст `various`, и главная клиента принимает его за «волну по треку»
+  (подпись трека с крестиком, «Назад к привычному» в колесе). В комнате это скрыто (`client-tweaks.ts`,
+  классы `ymsync-in-room`/`ymsync-wave-guest` на `<html>` и `--ymsync-room-label`), сверху — волна комнаты.
+- Иконки — `mod/branding/` (зелёная звезда, `scripts/green-icons.py` из иконок клиента); патчер кладёт их
+  поверх `assets` клиента, `icon.ico` — окно, ярлык, установщик.
 
 ### Оформление (тема Modrinth, `ui/theme/modrinth.css`)
 
@@ -196,7 +210,8 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
   (Vite/rolldown иначе падает).
 - UI мода — React + shadcn/Radix + Tailwind 4 в Shadow DOM (`ui/lib/shadow.tsx`): каждый корень
   (`#yandex-music-sync-root`, `#mod-sheet-container`, `#ymsync-topbar`, `#ymsync-dock`) со своей копией CSS.
-  Порталы Radix — через `usePortalContainer()`. Шрифт Inter объявлен в документе под именем «YMSync Inter»
+  Порталы Radix — через `usePortalContainer()`; всплывающее (Select, Tooltip) — `z-[2147483600]`, выше
+  модалки настроек (`z-[2147483000]`), и без своих `z-*` в `className` у вызовов. Шрифт Inter объявлен в документе под именем «YMSync Inter»
   (в shadow-корне @font-face не работает). @property Tailwind в shadow-корне не применяются —
   `withPropertyDefaults` дублирует их начальные значения. Стили самого клиента — только `ui/theme/modrinth.css`
   (оформление) и `ui/client-tweaks.ts` (скрытие блоков).

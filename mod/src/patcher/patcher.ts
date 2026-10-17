@@ -244,7 +244,9 @@ export async function processBuild(build: AppBuild, options: ProcessOptions) {
   log(`[5] Ресурсы и мост YandexSync`);
   const assetsDir = path.join(buildModdedDir, "assets");
   fs.cpSync(path.join(resourcesDir, "assets"), assetsDir, { recursive: true });
-  fs.copyFileSync(path.join(__projectRoot, "yaicon.png"), path.join(assetsDir, "icon.png"));
+  // Иконки мода поверх клиентских: та же звезда, но в зелёном акценте
+  // (branding/, собраны scripts/green-icons.py). icon.ico — окно, ярлык и установщик.
+  fs.cpSync(path.join(__projectRoot, "branding"), assetsDir, { recursive: true });
   fs.copyFileSync(await locateBridge(log), path.join(assetsDir, BRIDGE_EXE));
   log(`✔️   ${BRIDGE_EXE} в assets`);
 

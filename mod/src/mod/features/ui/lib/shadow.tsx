@@ -56,10 +56,42 @@ function withPropertyDefaults(css: string): string {
 
 const STYLES = `${withPropertyDefaults(modCss)}\n${sonnerCss}`;
 
+/** Корни мода: события из их полей ввода — наши, а не горячие клавиши клиента. */
+const modRoots = new WeakSet<ShadowRoot>();
+
+/**
+ * У клиента буквы — горячие клавиши: k — пауза, l и j — перемотка, n — следующий
+ * трек, m — звук и так далее. Он не реагирует на них в полях ввода, но событие
+ * из shadow-корня мода приходит к документу с хостом в target, а не с полем, —
+ * и клиент глотал эти буквы в названии комнаты, имени, адресе. Клавиши, нажатые
+ * в поле мода, дальше окна не идут. Ввод при этом не страдает: печать — действие
+ * браузера по умолчанию, а не обработчик. Escape и Tab идут как обычно: ими
+ * закрывают окна и переходят между полями.
+ */
+function guardModInputs() {
+  const stop = (event: KeyboardEvent) => {
+    if (event.key === "Escape" || event.key === "Tab") return;
+    const target = event.composedPath()[0];
+    if (!(target instanceof HTMLElement)) return;
+    const editable = target.isContentEditable || target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+    const root = target.getRootNode();
+    if (editable && root instanceof ShadowRoot && modRoots.has(root)) event.stopPropagation();
+  };
+  // На window в фазе захвата — раньше любого обработчика клиента.
+  for (const type of ["keydown", "keypress", "keyup"] as const) window.addEventListener(type, stop, true);
+}
+
+let inputsGuarded = false;
+
 /** Прикрепляет к элементу shadow-корень мода со стилями; повторно — тот же корень. */
 export function attachModShadow(host: HTMLElement): HTMLElement {
   declareFont();
+  if (!inputsGuarded) {
+    inputsGuarded = true;
+    guardModInputs();
+  }
   const root = host.shadowRoot ?? host.attachShadow({ mode: "open" });
+  modRoots.add(root);
   let mount = root.querySelector<HTMLElement>(":scope > [data-ymsync-mount]");
   if (!mount) {
     const style = document.createElement("style");
