@@ -429,16 +429,21 @@ impl YandexMusic {
     /// [`Self::wave_feedback`]), and the next batch is picked with that in mind.
     /// `played` lists tracks already heard, as `id` or `id:album`, so they are
     /// not handed out again.
-    pub async fn wave_session_new(&self, station: &str, played: &[String]) -> Result<WaveBatch> {
+    ///
+    /// `seeds` are what the official app passes for «Моя волна» and its presets:
+    /// `user:onyourwave`, `genre:rnb`, `artist:5839186`, `mood:energetic`… The
+    /// wave model comes back with it, which is where the wave's name is.
+    pub async fn wave_session_new(&self, seeds: &[String], played: &[String]) -> Result<WaveBatch> {
         let body = serde_json::json!({
-            "seeds": [station],
+            "seeds": seeds,
             "queue": played,
             "includeTracksInResponse": true,
+            "includeWaveModel": true,
         });
         let session: SessionBatch = self
             .post_json_result("/rotor/session/new", &body)
             .await
-            .with_context(|| format!("создание сессии волны {station}"))?;
+            .with_context(|| format!("создание сессии волны {}", seeds.join(", ")))?;
         let id = session
             .radio_session_id
             .clone()
@@ -969,6 +974,18 @@ struct SessionBatch {
     terminated: bool,
     #[serde(default)]
     unknown_session: bool,
+    /// Only with `includeWaveModel`, so only on a new session.
+    #[serde(default)]
+    wave: Option<WaveModel>,
+}
+
+/// The part of the wave model worth showing: what the wave is called.
+#[derive(Debug, Default, Deserialize)]
+struct WaveModel {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 impl SessionBatch {
@@ -981,10 +998,13 @@ impl SessionBatch {
         if tracks.is_empty() {
             bail!("волна не прислала ни одного трека");
         }
+        let wave = self.wave.unwrap_or_default();
         Ok(WaveBatch {
             session,
             batch_id: self.batch_id,
             tracks,
+            name: wave.name.filter(|n| !n.trim().is_empty()),
+            description: wave.description.filter(|d| !d.trim().is_empty()),
         })
     }
 }
@@ -997,6 +1017,10 @@ pub struct WaveBatch {
     /// Feedback names the batch the track came from.
     pub batch_id: Option<String>,
     pub tracks: Vec<Track>,
+    /// What Yandex calls the wave: «R'n'B», «Асия». Only on a new session.
+    pub name: Option<String>,
+    /// The line under the name: «Моя волна по жанру».
+    pub description: Option<String>,
 }
 
 /// Yandex no longer knows the session — it expired, or was ended. The answer is
@@ -1024,6 +1048,12 @@ pub enum WaveEvent {
     TrackFinished { track: String, played_secs: f64 },
     /// Moved on before the end — the strongest «not this» a listener gives.
     Skip { track: String, played_secs: f64 },
+    /// The heart, pressed or taken back — as the app reports it to its own wave.
+    Like { track: String },
+    Unlike { track: String },
+    /// «Не нравится», and how far into the track it was said.
+    Dislike { track: String, played_secs: f64 },
+    Undislike { track: String },
 }
 
 impl WaveEvent {
@@ -1033,6 +1063,10 @@ impl WaveEvent {
             WaveEvent::TrackStarted { .. } => "trackStarted",
             WaveEvent::TrackFinished { .. } => "trackFinished",
             WaveEvent::Skip { .. } => "skip",
+            WaveEvent::Like { .. } => "like",
+            WaveEvent::Unlike { .. } => "unlike",
+            WaveEvent::Dislike { .. } => "dislike",
+            WaveEvent::Undislike { .. } => "undislike",
         }
     }
 }
@@ -1048,10 +1082,15 @@ fn feedback_body(batch_id: Option<&str>, event: &WaveEvent, timestamp: &str) -> 
         WaveEvent::RadioStarted { station } => {
             from = Some(format!("radio-mobile-{}", station.replace(':', "-")));
         }
-        WaveEvent::TrackStarted { track } => {
+        WaveEvent::TrackStarted { track }
+        | WaveEvent::Like { track }
+        | WaveEvent::Unlike { track }
+        | WaveEvent::Undislike { track } => {
             inner["trackId"] = track.as_str().into();
         }
-        WaveEvent::TrackFinished { track, played_secs } | WaveEvent::Skip { track, played_secs } => {
+        WaveEvent::TrackFinished { track, played_secs }
+        | WaveEvent::Skip { track, played_secs }
+        | WaveEvent::Dislike { track, played_secs } => {
             inner["trackId"] = track.as_str().into();
             // Whole milliseconds: a float with fifteen digits after the point
             // says nothing more and only makes the request harder to read.
@@ -2124,6 +2163,37 @@ mod tests {
                           "totalPlayedSeconds": 12.346}
             })
         );
+    }
+
+    /// The heart and «не нравится» go to the wave the way the app sends them:
+    /// a dislike says how far into the track it came.
+    #[test]
+    fn likes_and_dislikes_are_feedback_too() {
+        let ts = "2026-01-02T03:04:05.006Z";
+        assert_eq!(
+            feedback_body(Some("b1"), &WaveEvent::Like { track: "10:7".into() }, ts),
+            serde_json::json!({"event": {"type": "like", "timestamp": ts, "trackId": "10:7"}, "batchId": "b1"})
+        );
+        assert_eq!(
+            feedback_body(None, &WaveEvent::Dislike { track: "10:7".into(), played_secs: 3.5 }, ts),
+            serde_json::json!({"event": {"type": "dislike", "timestamp": ts, "trackId": "10:7", "totalPlayedSeconds": 3.5}})
+        );
+        assert_eq!(WaveEvent::Unlike { track: "1".into() }.kind(), "unlike");
+        assert_eq!(WaveEvent::Undislike { track: "1".into() }.kind(), "undislike");
+    }
+
+    /// With the wave model asked for, a new session says what the wave is called.
+    #[test]
+    fn a_new_session_names_its_wave() {
+        let session: SessionBatch = serde_json::from_str(
+            r#"{"radioSessionId": "s", "batchId": "b",
+                "sequence": [{"track": {"id": "10", "title": "A"}}],
+                "wave": {"name": "R'n'B", "stationId": "genre:rnb", "description": "Моя волна по жанру"}}"#,
+        )
+        .unwrap();
+        let batch = session.into_batch("s".into()).unwrap();
+        assert_eq!(batch.name.as_deref(), Some("R'n'B"));
+        assert_eq!(batch.description.as_deref(), Some("Моя волна по жанру"));
     }
 
     #[test]

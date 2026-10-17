@@ -27,3 +27,6 @@ ymsync-proto = { version = "0.3.1", path = "../proto" }
 
 [dev-dependencies]
 ymsync-relay = { version = "0.3.1", path = "../relay", default-features = false }
+# A scripted participant for the tests, speaking the relay protocol directly.
+futures-util = "0.3.34"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake"] }

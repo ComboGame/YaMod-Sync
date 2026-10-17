@@ -295,3 +295,66 @@ async fn a_track_the_app_already_plays_runs_on_through_the_wait_and_is_slowed_no
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+/// When whoever fed the wave leaves, the room plays out what is queued and the
+/// wave stops there: nobody else's account takes it over unasked. The others
+/// are told, so they can start it again themselves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wave_whose_feeder_left_is_not_taken_over() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let mut relay = ymsync_relay::bind("127.0.0.1:0", TOKEN).await.expect("relay");
+    let url = format!("ws://{}", relay.local_addr());
+    let dir = cached_data_dir("unfed");
+
+    let mut app = start_bridge();
+    app.send(start_config(&url, "мод", &dir)).await;
+    app.expect("in", |m| m["t"] == "status" && m["state"] == "connected").await;
+
+    // The feeder: queues a track, claims the wave, and goes.
+    {
+        let (mut feeder, _) = tokio_tungstenite::connect_async(&url).await.expect("feeder");
+        let send = |value: Value| Message::text(value.to_string());
+        feeder
+            .send(send(json!({"t": "hello", "protocol": 6, "room": "test", "token": TOKEN, "client": "test", "name": "друг"})))
+            .await
+            .unwrap();
+        feeder
+            .send(send(json!({"t": "do", "command": {"c": "set_queue", "start": 0, "tracks": [serde_json::to_value(track("42")).unwrap()]}})))
+            .await
+            .unwrap();
+        let station = r#"{"seeds":["genre:rnb"],"name":"R'n'B","by":"друг"}"#;
+        feeder
+            .send(send(json!({"t": "do", "command": {"c": "set_station", "id": station}})))
+            .await
+            .unwrap();
+        app.expect("the wave in the room", |m| {
+            m["t"] == "snapshot" && m["snapshot"]["station"].as_str().is_some_and(|s| s.contains("R'n'B"))
+        })
+        .await;
+        feeder.close(None).await.unwrap();
+    }
+
+    let unfed = app
+        .expect("the wave without its feeder", |m| m["t"] == "snapshot" && m["snapshot"]["station_unfed"] == true)
+        .await;
+    assert_eq!(unfed["snapshot"]["feeding"], false, "{unfed}");
+    let notice = app
+        .expect("the room told", |m| {
+            m["t"] == "snapshot" && m["snapshot"]["notice"].as_str().is_some_and(|n| n.contains("доиграет"))
+        })
+        .await;
+    assert_eq!(notice["snapshot"]["feeding"], false);
+    // Nothing tries to feed it from here.
+    for message in app.drain(1500).await {
+        if message["t"] == "snapshot" {
+            assert_eq!(message["snapshot"]["feeding"], false, "{message}");
+            assert_ne!(message["snapshot"]["notice"], "подхватываю волну", "{message}");
+        }
+    }
+
+    app.send(json!({"t": "quit"})).await;
+    relay.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+}

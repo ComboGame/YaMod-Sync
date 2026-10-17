@@ -15,6 +15,7 @@
 import * as sonata from "./sonata";
 import type { TrackRef } from "./sonata";
 import { getTracksInfo } from "~/mod/features/utils/yandex-api";
+import { onYandexApiRequest } from "~/mod/features/utils";
 
 export type SessionState = "stopped" | "connecting" | "connected" | "reconnecting";
 
@@ -34,6 +35,8 @@ export type RoomSnapshot = {
   loading: boolean;
   station: string | null;
   feeding: boolean;
+  /** Включивший волну вышел: очередь доиграет, новых треков не будет. */
+  station_unfed: boolean;
   drift_ms: number | null;
   rtt_ms: number | null;
   hosting: string | null;
@@ -63,11 +66,28 @@ export type RoomCommand =
   | { c: "set_queue"; tracks: TrackRef[]; start: number }
   | { c: "enqueue"; tracks: TrackRef[] }
   | { c: "play_next"; tracks: TrackRef[] }
-  | { c: "wave" }
+  | { c: "wave"; seeds?: string[] }
+  | { c: "wave_feedback"; kind: FeedbackKind; track_id: string }
   | { c: "stop_wave" }
   | { c: "repeat"; mode: "off" | "all" | "one" }
   | { c: "shuffle"; on: boolean }
   | { c: "name"; name: string };
+
+export type FeedbackKind = "like" | "unlike" | "dislike" | "undislike";
+
+/** Что сказано о волне в строке станции комнаты (см. crates/core/src/station.rs). */
+export type StationInfo = { seeds: string[]; name?: string; description?: string; by?: string };
+
+export function parseStation(station: string | null): StationInfo | null {
+  if (!station) return null;
+  if (station.trim().startsWith("{")) {
+    try {
+      const spec = JSON.parse(station);
+      if (Array.isArray(spec.seeds) && spec.seeds.length) return spec;
+    } catch {}
+  }
+  return { seeds: [station] };
+}
 
 export type SyncState = {
   session: SessionState;
@@ -325,10 +345,14 @@ const INTERCEPTS: Record<string, Intercept> = {
   },
   playContext: ([params]) => {
     if (params?.contextData?.type === "vibe") {
-      // Волна комнаты — это ваша «Моя волна», но через ядро: оно подкачивает
-      // треки для всех и сообщает Яндексу, что дослушано и что пропущено.
-      activity("Вы включили «Мою волну» для всей комнаты");
-      command({ c: "wave" });
+      // Волна комнаты — это ваша «Моя волна» или выбранный пресет, но через
+      // ядро: оно подкачивает треки для всех по тем же сидам, что передал бы
+      // плеер, и сообщает Яндексу, что дослушано и что пропущено.
+      const seeds: string[] = Array.isArray(params.contextData.seeds)
+        ? params.contextData.seeds.map(String)
+        : [];
+      activity("Вы включили волну для всей комнаты");
+      command({ c: "wave", seeds });
       return "block";
     }
     // Своё: дать плееру загрузить, а очередь отправит detectUserAction.
@@ -353,6 +377,43 @@ function installInterceptors(facade: any) {
 }
 
 sonata.onFacade(installInterceptors);
+
+/**
+ * Лайк и дизлайк из приложения. Сам запрос в «Мне нравится» или «Не нравится»
+ * идёт как обычно, на ваш аккаунт. Если сейчас играет ваша волна, Яндекс,
+ * кроме того, узнаёт о нём как о фидбеке волны — так же, как его отправил бы
+ * клиент. Пропуск при дизлайке клиент делает сам, через moveForward, и он уже
+ * становится «следующим» для всей комнаты.
+ */
+const FEEDBACK_ROUTES: { pattern: RegExp; kind: FeedbackKind }[] = [
+  { pattern: /\/users\/[^/]+\/likes\/tracks\/add(?:\?|$)/, kind: "like" },
+  { pattern: /\/users\/[^/]+\/likes\/tracks\/([^/?]+)\/remove/, kind: "unlike" },
+  { pattern: /\/users\/[^/]+\/dislikes\/tracks\/add(?:\?|$)/, kind: "dislike" },
+  { pattern: /\/users\/[^/]+\/dislikes\/tracks\/([^/?]+)\/remove/, kind: "undislike" },
+];
+
+function onFeedbackRequest(request: Request) {
+  if (request.method !== "POST" || !inRoom()) return;
+  const room = state.room!;
+  if (!room.feeding || !room.station || !room.track) return;
+  const url = new URL(request.url);
+  for (const route of FEEDBACK_ROUTES) {
+    const match = url.pathname.match(route.pattern);
+    if (!match) continue;
+    const raw = match[1] ? decodeURIComponent(match[1]) : (url.searchParams.get("track-id") ?? "");
+    // `id:album` или просто id.
+    const trackId = raw.split(":")[0];
+    if (trackId !== room.track.track_id) return;
+    command({ c: "wave_feedback", kind: route.kind, track_id: trackId });
+    return;
+  }
+}
+
+for (const prefix of ["/likes/tracks/", "/dislikes/tracks/"]) {
+  onYandexApiRequest(prefix, async (request: Request) => {
+    onFeedbackRequest(request);
+  });
+}
 
 /** Очередь, которую пользователь включил в приложении, становится очередью комнаты. */
 async function shareForeignQueue() {

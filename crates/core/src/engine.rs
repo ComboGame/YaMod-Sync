@@ -38,6 +38,7 @@ use crate::likes::Likes;
 use crate::link::Link;
 use crate::playback::{AudioSource, Playback};
 use crate::share;
+use crate::station::StationSpec;
 use crate::stream::Progressive;
 
 /// A snapshot whose seq is this far below the last one means the relay restarted
@@ -119,6 +120,14 @@ pub enum Command {
     /// Follows an endless station, topping the room's queue up as it runs down.
     /// [`crate::api::WAVE_STATION`] is «Моя волна». This peer becomes the feeder.
     PlayStation { id: String, replace: bool },
+    /// «Моя волна» or one of its presets, for the whole room, fed from this
+    /// account: the seeds the app passes when the wave or a preset is started.
+    /// None is plain «Моя волна».
+    PlayWave { seeds: Vec<String> },
+    /// The heart or «не нравится» on a track of the wave this peer feeds, for
+    /// its session — the way the app reports them to its own wave. Ignored when
+    /// this peer feeds no wave.
+    WaveFeedback { track_id: String, kind: WaveFeedbackKind },
     /// Stops feeding a station. What is already queued still plays.
     StopStation,
     PlayIndex(usize),
@@ -167,6 +176,15 @@ pub enum Command {
     Shutdown,
 }
 
+/// What a listener said about a track of the wave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveFeedbackKind {
+    Like,
+    Unlike,
+    Dislike,
+    Undislike,
+}
+
 /// Everything a UI needs to draw itself. Published after every loop iteration.
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
@@ -187,6 +205,9 @@ pub struct Snapshot {
     pub station: Option<String>,
     /// Whether *this* peer is the one feeding that station.
     pub feeding: bool,
+    /// The room still follows the station, but whoever fed it has left: what is
+    /// queued plays out and nothing more comes until somebody starts it again.
+    pub station_unfed: bool,
     /// How far ahead (+) or behind (-) the room this peer is.
     pub drift_ms: Option<i64>,
     pub rtt_ms: Option<i64>,
@@ -360,6 +381,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         volume: player.volume(),
         station: None,
         feeding: false,
+        station_unfed: false,
         drift_ms: None,
         rtt_ms: link.clock().rtt_ms(),
         offset_ms: link.clock().offset_ms(),
@@ -396,7 +418,6 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         revision: 0,
         station: None,
         refilling: false,
-        quiet_station_refusal: false,
         remote: None,
         unavailable: HashSet::new(),
         deferred: HashMap::new(),
@@ -410,6 +431,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         shares: Vec::new(),
         hot,
         roster: Vec::new(),
+        name: cfg.display_name(),
         reported_barrier: None,
         share_port,
         // True from the start: the room has not been told anything yet, and even
@@ -482,6 +504,8 @@ enum Internal {
         fresh: bool,
         /// The session API failed and the old endpoint answered instead.
         legacy: bool,
+        name: Option<String>,
+        description: Option<String>,
     },
     /// The next track, fetched before the room got to it. `None` means the fetch
     /// failed; nothing is reported, since the ordinary load will try again and
@@ -559,22 +583,17 @@ struct Station {
     claimed: bool,
     /// The first batch replaces the room's queue rather than joining it.
     replace_first: bool,
-    /// Picked up from a room that was following a wave with nobody feeding it,
-    /// rather than switched on here. Losing such a claim is somebody else doing
-    /// the same job, so it is not worth telling the user about.
-    adopted: bool,
     /// The wave session this peer is feeding from. See [`WaveSession`].
     wave: WaveSession,
 }
 
 impl Station {
-    fn new(id: String, replace_first: bool, adopted: bool) -> Self {
+    fn new(id: String, replace_first: bool) -> Self {
         Self {
             id,
             after: None,
             claimed: false,
             replace_first,
-            adopted,
             wave: WaveSession::default(),
         }
     }
@@ -675,6 +694,9 @@ struct StationBatch {
     batch_id: Option<String>,
     fresh: bool,
     legacy: bool,
+    /// What Yandex calls the wave, from a new session.
+    name: Option<String>,
+    description: Option<String>,
 }
 
 async fn station_batch(
@@ -685,16 +707,17 @@ async fn station_batch(
     after: Option<String>,
     played: Vec<String>,
 ) -> Result<StationBatch> {
+    let spec = StationSpec::parse(station);
     if !legacy {
         let attempt = match session {
             Some(session) => match api.wave_session_tracks(&session, &played).await {
                 Err(err) if err.downcast_ref::<WaveSessionLost>().is_some() => {
                     debug!("wave session {session} is gone; opening a new one");
-                    api.wave_session_new(station, &played).await.map(|b| (b, true))
+                    api.wave_session_new(&spec.seeds, &played).await.map(|b| (b, true))
                 }
                 other => other.map(|b| (b, false)),
             },
-            None => api.wave_session_new(station, &played).await.map(|b| (b, true)),
+            None => api.wave_session_new(&spec.seeds, &played).await.map(|b| (b, true)),
         };
         match attempt {
             Ok((batch, fresh)) => {
@@ -704,6 +727,8 @@ async fn station_batch(
                     batch_id: batch.batch_id,
                     fresh,
                     legacy: false,
+                    name: batch.name,
+                    description: batch.description,
                 });
             }
             // The old endpoint still plays; it only does not learn. Better that
@@ -711,13 +736,15 @@ async fn station_batch(
             Err(err) => warn!("сессия волны недоступна, беру треки по-старому: {err:#}"),
         }
     }
-    let tracks = api.station_tracks(station, after.as_deref()).await?;
+    let tracks = api.station_tracks(spec.primary_seed(), after.as_deref()).await?;
     Ok(StationBatch {
         tracks,
         session: None,
         batch_id: None,
         fresh: false,
         legacy: true,
+        name: None,
+        description: None,
     })
 }
 
@@ -728,8 +755,9 @@ fn spawn_wave_reports(api: Arc<YandexMusic>) -> mpsc::UnboundedSender<WaveReport
         while let Some((session, batch_id, event)) = rx.recv().await {
             // Feedback that does not arrive costs the wave a little of its
             // aim, nothing more: it is never worth interrupting the music over.
-            if let Err(err) = api.wave_feedback(&session, batch_id.as_deref(), &event).await {
-                debug!("wave feedback was not accepted: {err:#}");
+            match api.wave_feedback(&session, batch_id.as_deref(), &event).await {
+                Ok(()) => debug!(?event, "wave feedback sent"),
+                Err(err) => debug!("wave feedback was not accepted: {err:#}"),
             }
         }
     });
@@ -829,9 +857,6 @@ struct Engine {
     station: Option<Station>,
     /// A request for more station tracks is in flight.
     refilling: bool,
-    /// Swallow the next `station_taken` refusal: it answers a claim this peer
-    /// made on its own initiative, on a wave that had lost its feeder.
-    quiet_station_refusal: bool,
 
     /// The room's state, as the relay last described it. This is the only
     /// authority on what should be playing.
@@ -870,6 +895,8 @@ struct Engine {
     hot: crate::share::Hot,
     /// Who is in the room, as the relay last listed them.
     roster: Vec<RosterEntry>,
+    /// What the room calls this listener; a wave started here is signed with it.
+    name: String,
     /// The last wait this peer said it was ready for, so it says so once.
     reported_barrier: Option<u64>,
     /// The port this machine serves its own cache on.
@@ -997,10 +1024,17 @@ impl Engine {
 
             Command::PlayStation { id, replace } => {
                 self.notice = Some("настраиваю волну…".to_string());
-                self.station = Some(Station::new(id, replace, false));
+                self.station = Some(Station::new(id, replace));
                 self.refilling = false;
                 self.request_station_tracks(internal);
             }
+
+            Command::PlayWave { seeds } => {
+                let id = StationSpec::from_seeds(seeds, &self.name).encode();
+                self.handle_command(Command::PlayStation { id, replace: true }, internal);
+            }
+
+            Command::WaveFeedback { track_id, kind } => self.wave_feedback(&track_id, kind),
 
             Command::StopStation => {
                 if self.station.take().is_some() {
@@ -1021,6 +1055,7 @@ impl Engine {
             Command::SetShuffle(on) => self.ask(ymsync_proto::Command::SetShuffle { on }),
             Command::SetAutoCache(on) => self.auto_cache = on,
             Command::SetName(name) => {
+                self.name = name.clone();
                 if !self.link.set_name(&name) {
                     self.connected = false;
                 }
@@ -1240,6 +1275,8 @@ impl Engine {
                     batch_id: batch.batch_id,
                     fresh: batch.fresh,
                     legacy: batch.legacy,
+                    name: batch.name,
+                    description: batch.description,
                 },
                 Err(err) => Internal::Station {
                     tracks: Vec::new(),
@@ -1248,6 +1285,8 @@ impl Engine {
                     batch_id: None,
                     fresh: false,
                     legacy: false,
+                    name: None,
+                    description: None,
                 },
             };
             let _ = internal.send(message);
@@ -1560,6 +1599,8 @@ impl Engine {
                 batch_id,
                 fresh,
                 legacy,
+                name,
+                description,
             } => {
                 self.refilling = false;
                 // The wave was switched off while the request was out.
@@ -1578,25 +1619,19 @@ impl Engine {
                     return;
                 }
 
-                // Somebody got to this wave first while the batch was in flight.
-                // Sending it now would push tracks the room's actual feeder is
-                // also about to push, so this peer steps aside instead.
-                if station.adopted
-                    && !station.claimed
-                    && self
-                        .remote
-                        .as_ref()
-                        .is_some_and(|state| state.station.is_some() && !state.station_unfed)
-                {
-                    self.station = None;
-                    return;
-                }
-
                 station.after = tracks.last().map(|t| t.track_id.clone());
                 // Before the queue goes out: the room's answer to it is what
                 // reports the first track as started, and by then the session
                 // has to know the track is one of its own.
                 station.wave.legacy = legacy;
+                // A new session names the wave; the room sees the name with the
+                // claim, which goes out right after this batch.
+                if name.is_some() || description.is_some() {
+                    let mut spec = StationSpec::parse(&station.id);
+                    spec.name = name.or(spec.name);
+                    spec.description = description.or(spec.description);
+                    station.id = spec.encode();
+                }
                 if let Some(session) = session {
                     if station.wave.reports.is_none()
                         && let Some(api) = self.api.clone()
@@ -1608,7 +1643,7 @@ impl Engine {
                             session.clone(),
                             batch_id.clone(),
                             WaveEvent::RadioStarted {
-                                station: station.id.clone(),
+                                station: StationSpec::parse(&station.id).primary_seed().to_string(),
                             },
                         ));
                     }
@@ -1913,25 +1948,14 @@ impl Engine {
                 }
 
                 // A wave the room still follows but nobody feeds: whoever was
-                // resolving its batches has left. Picking it up is what keeps the
-                // room from going quiet once the last queued track ends — and it
-                // is why coming back to a room you were feeding resumes the wave.
-                //
-                // Any peer may, and the relay hands it to whoever asks first; the
-                // losers are told and go quiet, which is cheaper than electing
-                // one.
+                // resolving its batches has left. What is queued plays out; it
+                // is not picked up on anybody's account without being asked —
+                // the wave was that listener's, and starting it again is a
+                // choice for whoever wants it.
                 if state.station_unfed
-                    && self.station.is_none()
-                    && let Some(id) = state.station.clone()
+                    && !self.remote.as_ref().is_some_and(|previous| previous.station_unfed)
                 {
-                    self.notice = Some("подхватываю волну".to_string());
-                    // Joining the queue, never replacing it: the room is
-                    // playing, and a replacing queue would also clear the very
-                    // station being claimed. The wave picks up wherever it
-                    // likes; what matters is that the queue keeps growing.
-                    self.station = Some(Station::new(id, false, true));
-                    self.refilling = false;
-                    self.request_station_tracks(internal);
+                    self.notice = Some("включивший волну вышел: она доиграет очередь и остановится".to_string());
                 }
 
                 self.report_wave_transition(&state);
@@ -1979,20 +2003,11 @@ impl Engine {
                     if let Some(station) = self.station.as_mut() {
                         station.claimed = true;
                     }
-                } else if let Some(lost) = self.station.take() {
-                    // Two peers noticing an unfed wave at once is the expected
-                    // way this goes; only one of them can win, and the loser has
-                    // nothing to report — somebody is doing the job.
-                    if lost.adopted {
-                        self.quiet_station_refusal = true;
-                    } else {
-                        self.notice = Some(match id {
-                            Some(_) => {
-                                "волну в этой комнате уже ведёт другой участник".to_string()
-                            }
-                            None => "волна выключена".to_string(),
-                        });
-                    }
+                } else if self.station.take().is_some() {
+                    self.notice = Some(match id {
+                        Some(_) => "волну в этой комнате уже ведёт другой участник".to_string(),
+                        None => "волна выключена".to_string(),
+                    });
                 }
             }
 
@@ -2033,11 +2048,6 @@ impl Engine {
             }
 
             Event::Error { code, message } => {
-                // The refusal that follows losing a wave we only picked up to be
-                // helpful. The `Station` frame arrives first and already said so.
-                if code == "station_taken" && std::mem::take(&mut self.quiet_station_refusal) {
-                    return;
-                }
                 self.notice = Some(format!("релей сообщил об ошибке ({code}): {message}"));
             }
         }
@@ -2091,6 +2101,24 @@ impl Engine {
         } else {
             self.connected = false;
         }
+    }
+
+    /// Passes the heart or «не нравится» on to the wave this peer feeds. A track
+    /// the session did not hand out, or no wave fed from here, says nothing.
+    fn wave_feedback(&mut self, track_id: &str, kind: WaveFeedbackKind) {
+        let position_ms = self.room_position_ms().unwrap_or(0).max(0);
+        let Some(station) = self.station.as_ref() else {
+            return;
+        };
+        station.wave.report(track_id, |track| match kind {
+            WaveFeedbackKind::Like => WaveEvent::Like { track },
+            WaveFeedbackKind::Unlike => WaveEvent::Unlike { track },
+            WaveFeedbackKind::Dislike => WaveEvent::Dislike {
+                track,
+                played_secs: position_ms as f64 / 1000.0,
+            },
+            WaveFeedbackKind::Undislike => WaveEvent::Undislike { track },
+        });
     }
 
     /// Tells the wave session what the room just did, when it moved to another
@@ -2305,6 +2333,7 @@ impl Engine {
             // being answered the station may still go to a quicker peer, and the
             // front ends hang their "switch the wave off" control on this.
             feeding: self.station.as_ref().is_some_and(|station| station.claimed),
+            station_unfed: self.remote.as_ref().is_some_and(|state| state.station_unfed),
             drift_ms: self.drift_ms,
             rtt_ms: self.link.clock().rtt_ms(),
             offset_ms: self.link.clock().offset_ms(),

@@ -3,9 +3,8 @@ import { Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Waves } f
 import { Button } from "@ui/components/ui/button";
 import { useSync } from "@ui/hooks/use-sync";
 import { cn } from "@ui/lib/utils";
-import { command, disconnect, type RoomSnapshot } from "~/mod/features/yandex-sync";
+import { command, disconnect, parseStation, type RoomSnapshot } from "~/mod/features/yandex-sync";
 
-const WAVE = "user:onyourwave";
 
 function formatTime(ms: number) {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -71,7 +70,7 @@ function NowPlaying({ room }: { room: RoomSnapshot }) {
   const track = room.track;
   const duration = room.duration_ms || track?.duration_ms || 0;
   const progress = duration ? Math.min(1, room.position_ms / duration) : 0;
-  const waveOn = room.station === WAVE;
+  const wave = parseStation(room.station);
 
   return (
     <div className="flex flex-col gap-4 rounded-[var(--ym-radius-size-xxl,1.5rem)] bg-card p-4">
@@ -144,25 +143,53 @@ function NowPlaying({ room }: { room: RoomSnapshot }) {
         </div>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <Button
-          variant="secondary"
-          onClick={() => command(waveOn ? { c: "stop_wave" } : { c: "wave" })}
-          // Волну подкачивает аккаунт, который её включил, и выключить её может только он.
-          disabled={waveOn && !room.feeding}
-          className={cn("w-full", waveOn && "text-primary")}
-        >
-          <Waves className="size-4" />
-          {waveOn ? "Выключить «Мою волну»" : "Включить «Мою волну» для всех"}
-        </Button>
-        {waveOn && (
-          <p className="text-muted-foreground text-center text-xs">
-            {room.feeding
-              ? "Треки подбираются для вашего аккаунта"
-              : "Треки подбираются для участника, который включил волну. Выключить её может он"}
-          </p>
-        )}
+      <WaveControl room={room} wave={wave} />
+    </div>
+  );
+}
+
+/** Какая волна играет у комнаты, чья она, и что с ней можно сделать отсюда. */
+function WaveControl({ room, wave }: { room: RoomSnapshot; wave: ReturnType<typeof parseStation> }) {
+  if (!wave) {
+    return (
+      <Button variant="secondary" className="w-full" onClick={() => command({ c: "wave" })}>
+        <Waves className="size-4" />
+        Включить «Мою волну» для всех
+      </Button>
+    );
+  }
+  const title = wave.name ?? "Моя волна";
+  const whose = room.feeding ? "для вашего аккаунта" : wave.by ? `для аккаунта ${wave.by}` : "для участника, который её включил";
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2.5">
+        <Waves className="text-primary size-5 shrink-0" />
+        <div className="min-w-0">
+          <div className="text-foreground truncate text-sm font-medium">{title}</div>
+          <div className="text-muted-foreground truncate text-xs">
+            {wave.description && wave.description !== title ? `${wave.description}, ` : ""}
+            {whose}
+          </div>
+        </div>
       </div>
+      {room.station_unfed ? (
+        <>
+          <p className="text-muted-foreground text-xs leading-snug">
+            Включивший волну вышел: она доиграет очередь и остановится.
+          </p>
+          <Button variant="secondary" className="w-full" onClick={() => command({ c: "wave", seeds: wave.seeds })}>
+            Продолжить эту волну со своего аккаунта
+          </Button>
+        </>
+      ) : room.feeding ? (
+        <Button variant="secondary" className="w-full" onClick={() => command({ c: "stop_wave" })}>
+          Выключить волну
+        </Button>
+      ) : (
+        <p className="text-muted-foreground text-xs leading-snug">
+          Выключить её может тот, кто включил. Свою волну или пресет можно включить в приложении — она заменит эту.
+        </p>
+      )}
     </div>
   );
 }

@@ -65,13 +65,29 @@ pub enum UiCommand {
     SetQueue { tracks: Vec<TrackRef>, start: usize },
     Enqueue { tracks: Vec<TrackRef> },
     PlayNext { tracks: Vec<TrackRef> },
-    /// «Моя волна» for the whole room, fed from this account.
-    Wave,
+    /// «Моя волна» or a preset for the whole room, fed from this account. The
+    /// seeds are the app's own: none for plain «Моя волна», `genre:rnb`,
+    /// `artist:5839186` and so on for a preset.
+    Wave {
+        #[serde(default)]
+        seeds: Vec<String>,
+    },
+    /// The heart or «не нравится» on a track, for the wave this peer feeds.
+    WaveFeedback { kind: FeedbackKind, track_id: String },
     StopWave,
     Repeat { mode: RepeatMode },
     Shuffle { on: bool },
     Name { name: String },
     Like { track: TrackRef, liked: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackKind {
+    Like,
+    Unlike,
+    Dislike,
+    Undislike,
 }
 
 /// What the app's player is doing.
@@ -159,7 +175,18 @@ mod tests {
             serde_json::from_str(r#"{"t":"command","command":{"c":"seek","ms":5000}}"#).unwrap();
         assert!(matches!(input, Input::Command { command: UiCommand::Seek { ms: 5000 } }));
         let input: Input = serde_json::from_str(r#"{"t":"command","command":{"c":"wave"}}"#).unwrap();
-        assert!(matches!(input, Input::Command { command: UiCommand::Wave }));
+        assert!(matches!(input, Input::Command { command: UiCommand::Wave { seeds } } if seeds.is_empty()));
+        let input: Input =
+            serde_json::from_str(r#"{"t":"command","command":{"c":"wave","seeds":["genre:rnb"]}}"#).unwrap();
+        assert!(matches!(input, Input::Command { command: UiCommand::Wave { seeds } } if seeds == ["genre:rnb"]));
+        let input: Input = serde_json::from_str(
+            r#"{"t":"command","command":{"c":"wave_feedback","kind":"dislike","track_id":"42"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            input,
+            Input::Command { command: UiCommand::WaveFeedback { kind: FeedbackKind::Dislike, .. } }
+        ));
     }
 
     #[test]

@@ -2191,9 +2191,11 @@ name = "ymsync-bridge"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "futures-util",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "ymsync",

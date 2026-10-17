@@ -20,4 +20,5 @@ pub mod playback;
 pub mod playlists;
 pub mod session;
 pub mod share;
+pub mod station;
 pub mod stream;
