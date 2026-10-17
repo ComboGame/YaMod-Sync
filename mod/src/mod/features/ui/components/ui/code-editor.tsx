@@ -1,13 +1,11 @@
 import { Editor } from "@monaco-editor/react";
-import { useTheme } from "@ui/contexts/ThemeContext";
 
 export function CodeEditor(props: any) {
-  const { theme } = useTheme();
 
   return (
     <Editor
       height="400px"
-      theme={theme === "dark" ? "vs-dark" : "vs"}
+      theme="vs-dark"
       defaultLanguage="text"
       defaultValue="{}"
       options={{

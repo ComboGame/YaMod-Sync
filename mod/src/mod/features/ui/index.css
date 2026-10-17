@@ -1,79 +1,86 @@
+/* Стили панели Sync. Этот файл попадает только в shadow-корни мода
+   (lib/shadow.tsx) — клиент Яндекс Музыки его не видит. */
 @import "tailwindcss";
 
 @plugin "tailwindcss-animate";
 
-@custom-variant dark (&:is(.ym-dark-theme *));
+/* Панель всегда в тёмной OLED-теме Modrinth. */
+@custom-variant dark (&:where(.ymsync-root, .ymsync-root *));
 
-:root {
-  --fallback-background: #fff;
-  --fallback-foreground: #141414;
-  --fallback-card: rgba(0, 0, 0, 0.04);
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(0.97 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.88 0.17 93.42);
-  --primary-foreground: oklch(0.145 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-}
+/*
+ * Дизайн-токены: OLED-тема Modrinth (modrinth/code, packages/assets/styles/variables.scss,
+ * .oled-mode поверх .dark-mode). Поверхности — слои от чёрного к серому: чем выше
+ * слой, тем светлее.
+ */
+:host {
+  --ms-surface-1: #000000;
+  --ms-surface-1-5: #050506;
+  --ms-surface-2: #09090a;
+  --ms-surface-2-5: #0c0d11;
+  --ms-surface-3: #101013;
+  --ms-surface-4: #1b1b20;
+  --ms-surface-5: #25262b;
 
-/* Токены мода берутся из палитры самого приложения: панель мода выглядит как
-   его часть и сама следует светлой или тёмной теме. Значения в :root выше —
-   запасные, на случай если приложение переименует свои переменные. */
-body {
-  --background: var(--ym-background-color-primary-enabled-popover, var(--fallback-background));
-  --foreground: var(--ym-controls-color-primary-text-enabled_variant, var(--fallback-foreground));
-  --card: var(--ym-surface-color-primary-enabled-list, var(--fallback-card));
-  --card-foreground: var(--foreground);
-  --popover: var(--ym-background-color-primary-enabled-popover, var(--fallback-background));
-  --popover-foreground: var(--foreground);
-  --primary: var(--ym-controls-color-primary-default-enabled, #ffdb4d);
-  --primary-hover: var(--ym-controls-color-primary-default-hovered, #f2cc33);
-  --primary-foreground: var(--ym-controls-color-primary-on_default-enabled, #000);
-  --secondary: var(--ym-surface-color-primary-enabled-list, var(--fallback-card));
-  --secondary-foreground: var(--foreground);
-  --muted: var(--ym-surface-color-primary-enabled-list, var(--fallback-card));
-  --muted-foreground: var(--ym-controls-color-primary-text-enabled, #808080);
-  --accent: var(--ym-controls-color-primary-outline-hovered, #4d4d4d);
-  --accent-foreground: var(--foreground);
-  --destructive: var(--ym-controls-color-accent-default-enabled, #d5594d);
-  --border: var(--ym-outline-color-primary-disabled, rgba(0, 0, 0, 0.08));
-  --input: var(--ym-controls-color-primary-outline-enabled, rgba(0, 0, 0, 0.12));
-  --ring: var(--ym-controls-color-primary-default-focused_stroke, rgba(255, 219, 77, 0.5));
-  --panel: var(--ym-background-color-primary-enabled-content, var(--fallback-background));
-  --radius: var(--ym-radius-size-xl, 1rem);
+  --ms-text-strong: #ffffff;
+  --ms-text: #b0bac5;
+  --ms-text-muted: #96a2b0;
+
+  --ms-brand: #1bd96a;
+  --ms-brand-hover: #42e686;
+  --ms-on-brand: #000000;
+  --ms-brand-soft: rgba(27, 217, 106, 0.2);
+  --ms-brand-highlight: rgba(27, 217, 106, 0.25);
+  --ms-brand-gradient: linear-gradient(0deg, rgba(22, 66, 51, 0.15) 0%, rgba(55, 137, 73, 0.1) 100%);
+  --ms-button-gradient: linear-gradient(180deg, #1b1b20 0%, #25262b 100%);
+  --ms-red: #ed4661;
+  --ms-orange: #e08325;
+
+  --ms-radius-xs: 0.25rem;
+  --ms-radius-sm: 0.5rem;
+  --ms-radius-md: 0.75rem;
+  --ms-radius-lg: 1rem;
+  --ms-radius-xl: 1.25rem;
+
+  --ms-gap-xs: 0.25rem;
+  --ms-gap-sm: 0.5rem;
+  --ms-gap-md: 0.75rem;
+  --ms-gap-lg: 1rem;
+  --ms-gap-xl: 1.5rem;
+
+  --ms-font: "YMSync Inter", Inter, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --ms-shadow-card: rgba(0, 0, 0, 0.25) 0px 2px 4px 0px;
+  --ms-shadow-floating: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--ms-surface-4);
+
+  /* Токены, на которых написаны примитивы shadcn (components/ui). */
+  --background: var(--ms-surface-1);
+  --foreground: var(--ms-text);
+  --card: var(--ms-surface-3);
+  --card-foreground: var(--ms-text);
+  --popover: var(--ms-surface-3);
+  --popover-foreground: var(--ms-text);
+  --primary: var(--ms-brand);
+  --primary-hover: var(--ms-brand-hover);
+  --primary-foreground: var(--ms-on-brand);
+  --secondary: var(--ms-surface-4);
+  --secondary-foreground: var(--ms-text);
+  --muted: var(--ms-surface-4);
+  --muted-foreground: var(--ms-text-muted);
+  --accent: var(--ms-surface-5);
+  --accent-foreground: var(--ms-text-strong);
+  --destructive: var(--ms-red);
+  --border: var(--ms-surface-4);
+  --input: var(--ms-surface-4);
+  --ring: var(--ms-brand-highlight);
+  --panel: var(--ms-surface-2);
+  --radius: var(--ms-radius-md);
 }
 
 @theme inline {
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--ms-font);
+  --radius-sm: var(--ms-radius-sm);
+  --radius-md: var(--ms-radius-md);
+  --radius-lg: var(--ms-radius-lg);
+  --radius-xl: var(--ms-radius-xl);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -82,7 +89,6 @@ body {
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-hover: var(--primary-hover);
-  --color-panel: var(--panel);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
@@ -94,39 +100,44 @@ body {
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
+  --color-panel: var(--panel);
+  --color-strong: var(--ms-text-strong);
+  --color-surface-1: var(--ms-surface-1);
+  --color-surface-2: var(--ms-surface-2);
+  --color-surface-3: var(--ms-surface-3);
+  --color-surface-4: var(--ms-surface-4);
+  --color-surface-5: var(--ms-surface-5);
+  --color-brand: var(--ms-brand);
+  --color-brand-soft: var(--ms-brand-soft);
 }
 
 @layer base {
-  * {
+  .ymsync-root {
+    font-family: var(--ms-font);
+    color: var(--ms-text);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  .ymsync-root * {
     @apply border-border outline-ring/50;
+  }
+  .ymsync-root ::-webkit-scrollbar {
+    width: 10px;
+  }
+  .ymsync-root ::-webkit-scrollbar-thumb {
+    background: var(--ms-surface-5);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
   }
 }
 
-aside[class*="Navbar_root_collapsed"] span.trigger-text {
-  display: none;
-}
-
-div[data-test-id="LIKES_HISTORY_COVERS"] {
-  display: none;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  #yandex-music-sync-panel *,
-  #mod-sheet-container * {
-    animation: none !important;
-    transition: none !important;
+  .ymsync-root *,
+  .ymsync-root *::before,
+  .ymsync-root *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }

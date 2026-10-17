@@ -21,7 +21,7 @@ import {
 function Field(props: { label: string; hint?: string; children: React.ReactNode; htmlFor: string }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={props.htmlFor} className="text-foreground text-[13px] font-medium">
+      <label htmlFor={props.htmlFor} className="text-strong text-[13px] font-semibold">
         {props.label}
       </label>
       {props.children}
@@ -61,9 +61,12 @@ export function JoinForm() {
   };
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-4 px-5 pt-5 pb-4">
+    <form
+      onSubmit={submit}
+      className="mx-auto flex w-full max-w-[460px] flex-col gap-4 rounded-lg border border-surface-4 bg-surface-3 p-5 shadow-[var(--ms-shadow-card)]"
+    >
       <div>
-        <h2 className="text-foreground text-xl font-bold">Слушать вместе</h2>
+        <h2 className="text-strong text-xl font-bold">Слушать вместе</h2>
         <p className="text-muted-foreground mt-1 text-[13px] leading-snug">
           У всех в комнате играет одно и то же с одной позиции. Пауза, перемотка, очередь и «Моя волна» — общие, а
           управлять может любой.
@@ -71,7 +74,7 @@ export function JoinForm() {
       </div>
 
       {!hasYandexToken() && (
-        <p className="rounded-xl bg-card px-3.5 py-2.5 text-[13px] leading-snug text-foreground">
+        <p className="rounded-md border border-[#e08325]/40 bg-[#e08325]/10 px-3.5 py-2.5 text-[13px] leading-snug text-strong">
           Войдите в аккаунт Яндекса с Плюсом: треки комнаты играют с вашей подписки.
         </p>
       )}
@@ -107,7 +110,7 @@ export function JoinForm() {
               type="button"
               onClick={() => setShowPassword((v) => !v)}
               aria-label={showPassword ? "Скрыть пароль" : "Показать пароль"}
-              className="text-muted-foreground hover:text-foreground absolute inset-y-0 right-0 flex w-9 cursor-pointer items-center justify-center"
+              className="text-muted-foreground hover:text-strong absolute inset-y-0 right-0 flex w-9 cursor-pointer items-center justify-center"
             >
               {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
             </button>
@@ -119,7 +122,7 @@ export function JoinForm() {
         <Input id={ids.name} value={config.name} maxLength={32} onChange={(e) => update({ name: e.target.value })} />
       </Field>
 
-      <div className="flex flex-col">
+      <div className="flex flex-col rounded-md bg-surface-2 px-3.5 py-3">
         <SettingRow
           title="Держать комнату на этом компьютере"
           hint="Без сервера: остальные подключаются к вам. Нужен открытый порт"

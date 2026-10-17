@@ -2,23 +2,50 @@ import { useEffect, useId, useState, type ReactNode } from "react";
 import { Switch } from "@ui/components/ui/switch";
 import { cn } from "@ui/lib/utils";
 
-/** Раздел панели: заголовок и строки под ним, без отдельной коробки на каждую настройку. */
+/** Карточка — слой над фоном панели, как карточки в Modrinth App. */
+export function Card(props: { children: ReactNode; className?: string; tone?: "plain" | "brand" }) {
+  return (
+    <section
+      className={cn(
+        "rounded-lg border border-surface-4 p-4 shadow-[var(--ms-shadow-card)]",
+        props.tone === "brand" ? "bg-surface-3 bg-[image:var(--ms-brand-gradient)]" : "bg-surface-3",
+        props.className,
+      )}
+    >
+      {props.children}
+    </section>
+  );
+}
+
+/** Заголовок карточки: что это, и при необходимости одно пояснение под ним. */
+export function CardTitle(props: { title: string; description?: string; aside?: ReactNode }) {
+  return (
+    <div className="mb-3 flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <h3 className="text-strong text-[15px] font-bold">{props.title}</h3>
+        {props.description && <p className="text-muted-foreground mt-0.5 text-[13px] leading-snug">{props.description}</p>}
+      </div>
+      {props.aside}
+    </div>
+  );
+}
+
+/** Карточка с заголовком и строками настроек под ним. */
 export function PanelSection(props: { title: string; description?: string; children: ReactNode; className?: string }) {
   return (
-    <section className={cn("px-5 py-4", props.className)}>
-      <h3 className="text-foreground text-[15px] font-bold">{props.title}</h3>
-      {props.description && <p className="text-muted-foreground mt-1 text-[13px] leading-snug">{props.description}</p>}
-      <div className="mt-2 flex flex-col">{props.children}</div>
-    </section>
+    <Card className={props.className}>
+      <CardTitle title={props.title} description={props.description} />
+      <div className="flex flex-col">{props.children}</div>
+    </Card>
   );
 }
 
 /** Строка настройки: что это и что меняет — слева, переключатель или поле — справа. */
 export function SettingRow(props: { title: string; hint?: string; htmlFor?: string; children: ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-border py-3 last:border-b-0">
+    <div className="flex items-center justify-between gap-4 border-t border-surface-4 py-3 first:border-t-0 first:pt-0 last:pb-0">
       <label htmlFor={props.htmlFor} className="flex min-w-0 cursor-pointer flex-col">
-        <span className="text-foreground text-sm">{props.title}</span>
+        <span className="text-strong text-sm">{props.title}</span>
         {props.hint && <span className="text-muted-foreground text-[13px] leading-snug">{props.hint}</span>}
       </label>
       <div className="shrink-0">{props.children}</div>
@@ -51,33 +78,5 @@ export function StoredSwitch(props: { storageKey: string; title: string; hint?: 
         }}
       />
     </SettingRow>
-  );
-}
-
-/** Переключатель вкладок в виде «таблеток», как фильтры в самой Яндекс Музыке. */
-export function Segmented<T extends string>(props: {
-  value: T;
-  options: { value: T; label: string }[];
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div role="tablist" className="flex gap-1.5">
-      {props.options.map((option) => (
-        <button
-          key={option.value}
-          role="tab"
-          aria-selected={props.value === option.value}
-          onClick={() => props.onChange(option.value)}
-          className={cn(
-            "h-8 cursor-pointer rounded-full px-3.5 text-[13px] font-medium transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
-            props.value === option.value
-              ? "bg-foreground text-background"
-              : "bg-card text-foreground hover:bg-accent/60",
-          )}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
   );
 }

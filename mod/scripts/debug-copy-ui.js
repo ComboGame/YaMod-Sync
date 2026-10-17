@@ -23,9 +23,7 @@ if (!latest) {
 const modPath = path.join(".versions", latest, "mod", "app", "yandexMusicMod");
 fs.mkdirSync(modPath, { recursive: true });
 
-for (const file of ["renderer.js", "renderer.css"]) {
-  fs.copyFileSync(path.join("src/mod/dist", file), path.join(modPath, file));
-}
+fs.copyFileSync(path.join("src/mod/dist", "renderer.js"), path.join(modPath, "renderer.js"));
 const rendererPath = path.join(modPath, "renderer.js");
 fs.writeFileSync(rendererPath, `(function () {\n${fs.readFileSync(rendererPath, "utf8")}\n})()`);
 

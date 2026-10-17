@@ -219,9 +219,9 @@ export async function processBuild(build: AppBuild, options: ProcessOptions) {
 
   const modAppDir = path.join(buildModdedDir, "app", "yandexMusicMod");
   fs.mkdirSync(modAppDir, { recursive: true });
-  for (const asset of ["renderer.js", "renderer.css"]) {
-    fs.copyFileSync(path.join(modCompiledDir, asset), path.join(modAppDir, asset));
-  }
+  // Стили мода живут в его shadow-корнях внутри renderer.js; отдельного
+  // renderer.css, видимого клиенту, больше нет.
+  fs.copyFileSync(path.join(modCompiledDir, "renderer.js"), path.join(modAppDir, "renderer.js"));
   const rendererPath = path.join(modAppDir, "renderer.js");
   fs.writeFileSync(rendererPath, `(function () {\n${fs.readFileSync(rendererPath, "utf8")}\n})()`);
 
@@ -235,7 +235,7 @@ export async function processBuild(build: AppBuild, options: ProcessOptions) {
       fullHtmlPath,
       html.replace(
         "<head>",
-        `<head><script src="/yandexMusicMod/renderer.js"></script><link rel="stylesheet" href="/yandexMusicMod/renderer.css">`,
+        `<head><script src="/yandexMusicMod/renderer.js"></script>`,
       ),
     );
   }
