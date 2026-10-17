@@ -1,0 +1,81 @@
+# Builds «Яндекс Музыка Sync» — the Yandex Music mod with YandexSync built in —
+# and publishes it as a GitHub release.
+#
+# A pushed tag `mod-vX.Y.Z` builds the installer and publishes a release with it.
+# «Run workflow» on the Actions page builds the same installer without a
+# release, as a downloadable artifact.
+#
+# The patcher downloads the current stable Yandex Music for Windows, patches it,
+# builds ymsync-bridge from crates/bridge and packs an NSIS installer — all of
+# which needs Windows (MSVC for the bridge, the Windows build of the app).
+
+name: mod-release
+
+on:
+  push:
+    tags: ["mod-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # The version that wrote bun.lockb; bun.lock is left over from the
+          # original mod and newer Bun releases would prefer it.
+          bun-version: 1.1.27
+
+      - name: Bridge tests
+        run: cargo test --locked -p ymsync-bridge
+
+      - name: Dependencies
+        working-directory: Yandex-Music-Mod-2.23.2
+        env:
+          # electron-builder fetches its own Electron; the npm one is only for
+          # running the mod from a dev folder.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: bun install
+
+      - name: Patch and package
+        working-directory: Yandex-Music-Mod-2.23.2
+        run: bun run start
+
+      - id: built
+        name: Locate the installer
+        run: |
+          installer=$(ls Yandex-Music-Mod-2.23.2/.versions/*/mod/dist/YandexMusicSync-Setup-*.exe | head -1)
+          [ -f "$installer" ] || { echo "::error::no installer"; exit 1; }
+          app_version=$(basename "$installer" | sed -E 's/YandexMusicSync-Setup-(.*)\.exe/\1/')
+          mkdir -p dist
+          cp "$installer" dist/
+          (cd dist && sha256sum *.exe > SHA256SUMS.txt)
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "Яндекс Музыка $app_version"; cat dist/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yandex-music-sync-${{ steps.built.outputs.app_version }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ steps.built.outputs.app_version }}
+        run: |
+          mod_version="${GITHUB_REF_NAME#mod-v}"
+          sed "s/{APP_VERSION}/$APP_VERSION/g; s/{MOD_VERSION}/$mod_version/g" release-notes/mod.md > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+            --title "Яндекс Музыка Sync $mod_version (Яндекс Музыка $APP_VERSION)" \
+            --notes-file notes.md
