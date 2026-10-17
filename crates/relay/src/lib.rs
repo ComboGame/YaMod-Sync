@@ -175,6 +175,52 @@ pub async fn bind_with(
     token: impl Into<String>,
     discoverable: bool,
 ) -> Result<Server> {
+    bind_opts(
+        bind_addr,
+        token,
+        Options {
+            discoverable,
+            ..Options::default()
+        },
+    )
+    .await
+}
+
+/// What a relay does besides holding rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// Answer «кто держит комнаты» broadcasts.
+    pub discoverable: bool,
+    /// Broker the local-network sharing map.
+    ///
+    /// Off for a relay on the internet. There the address a peer's connection
+    /// arrives from is its router's, or the reverse proxy's, and a file server
+    /// behind either cannot be reached by the rest of the room — so every
+    /// announced track would only cost the others a connect timeout before they
+    /// go to Yandex anyway. With this off, announcements are accepted and
+    /// dropped, and the map every peer sees stays empty.
+    pub lan_share: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            discoverable: true,
+            lan_share: true,
+        }
+    }
+}
+
+/// [`bind`], with every [`Options`] spelled out.
+pub async fn bind_opts(
+    bind_addr: &str,
+    token: impl Into<String>,
+    options: Options,
+) -> Result<Server> {
+    let Options {
+        discoverable,
+        lan_share,
+    } = options;
     let token = token.into();
     if token.trim().is_empty() {
         bail!(
@@ -189,7 +235,7 @@ pub async fn bind_with(
     let local_addr = listener
         .local_addr()
         .context("reading the relay's own address")?;
-    info!(bind = %local_addr, protocol = PROTOCOL_VERSION, "relay listening");
+    info!(bind = %local_addr, protocol = PROTOCOL_VERSION, lan_share, "relay listening");
 
     let (shutdown, shutdown_rx) = watch::channel(false);
     let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
@@ -204,7 +250,8 @@ pub async fn bind_with(
         Arc::clone(&rooms),
         shutdown_rx.clone(),
     ));
-    let accept = tokio::spawn(accept_loop(listener, Arc::new(token), rooms, shutdown_rx));
+    let policy = Arc::new(Policy { token, lan_share });
+    let accept = tokio::spawn(accept_loop(listener, policy, rooms, shutdown_rx));
 
     Ok(Server {
         local_addr,
@@ -337,9 +384,16 @@ fn encode_discovery(msg: &Discovery) -> Vec<u8> {
     serde_json::to_vec(msg).unwrap_or_else(|_| b"{}".to_vec())
 }
 
+/// What every connection is held to: the room secret, and whether the sharing
+/// map is brokered at all.
+struct Policy {
+    token: String,
+    lan_share: bool,
+}
+
 async fn accept_loop(
     listener: TcpListener,
-    token: Arc<String>,
+    policy: Arc<Policy>,
     rooms: Rooms,
     shutdown: watch::Receiver<bool>,
 ) {
@@ -354,13 +408,13 @@ async fn accept_loop(
         };
         let id = next_id.fetch_add(1, Ordering::Relaxed);
         let rooms = Arc::clone(&rooms);
-        let token = Arc::clone(&token);
+        let policy = Arc::clone(&policy);
         let mut shutdown = shutdown.clone();
         tokio::spawn(async move {
             // A connection would outlive the accept loop, so each one watches
             // for the shutdown itself.
             let served = tokio::select! {
-                result = serve(stream, addr, id, rooms, token) => result,
+                result = serve(stream, addr, id, rooms, policy) => result,
                 _ = shutdown.changed() => Ok(()),
             };
             if let Err(err) = served {
@@ -983,7 +1037,7 @@ async fn serve(
     addr: SocketAddr,
     id: u64,
     rooms: Rooms,
-    token: Arc<String>,
+    policy: Arc<Policy>,
 ) -> Result<()> {
     // Nagle would add tens of milliseconds to the small, latency-critical state
     // and clock frames.
@@ -1004,7 +1058,7 @@ async fn serve(
         let _ = ws_tx.close().await;
     });
 
-    let result = session(&mut ws_rx, &tx, id, addr, &rooms, &token).await;
+    let result = session(&mut ws_rx, &tx, id, addr, &rooms, &policy).await;
 
     // Dropping our sender ends the writer loop once everything queued (an error
     // frame, a peer notification) has actually been flushed.
@@ -1019,8 +1073,9 @@ async fn session(
     id: u64,
     addr: SocketAddr,
     rooms: &Rooms,
-    token: &str,
+    policy: &Policy,
 ) -> Result<()> {
+    let token = policy.token.as_str();
     let hello = match tokio::time::timeout(HELLO_TIMEOUT, next_client_msg(ws_rx)).await {
         Err(_) => {
             reject(tx, "timeout", "no hello within 10s");
@@ -1126,7 +1181,7 @@ async fn session(
     };
     info!(peer = id, %addr, room = %room_name, client = %client, peers, "joined");
 
-    let outcome = pump(ws_rx, tx, id, addr, &room_name, rooms).await;
+    let outcome = pump(ws_rx, tx, id, addr, &room_name, rooms, policy.lan_share).await;
 
     // Leave.
     let mut guard = rooms.lock().await;
@@ -1204,6 +1259,7 @@ async fn pump(
     addr: SocketAddr,
     room_name: &str,
     rooms: &Rooms,
+    lan_share: bool,
 ) -> Result<()> {
     loop {
         let msg = match tokio::time::timeout(IDLE_TIMEOUT, next_client_msg(ws_rx)).await {
@@ -1252,6 +1308,12 @@ async fn pump(
                 }
             }
             ClientMsg::Share { port, tracks } => {
+                // Not an error to the peer: it announces on every cache change and
+                // has no way to know this relay faces the internet. The map it
+                // got on joining was empty, and it stays that way.
+                if !lan_share {
+                    continue;
+                }
                 if tracks.len() > MAX_SHARED {
                     reject(tx, "too_many_shares", error_message("too_many_shares"));
                     continue;

@@ -39,6 +39,11 @@ impl Drop for Relay {
 
 impl Relay {
     async fn start() -> Relay {
+        Relay::start_with(&[]).await
+    }
+
+    /// [`Relay::start`], with extra command-line flags.
+    async fn start_with(extra: &[&str]) -> Relay {
         // Ask the OS for a free port, then hand it to the relay.
         let port = {
             let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
@@ -48,6 +53,7 @@ impl Relay {
 
         let child = OsCommand::new(env!("CARGO_BIN_EXE_ymsync-relay"))
             .args(["--bind", &bind, "--token", TOKEN])
+            .args(extra)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -800,6 +806,30 @@ async fn a_departing_peer_that_shared_nothing_is_silent() {
     drop(relay.join().await);
 
     assert_quiet(&mut watcher, 12).await;
+}
+
+/// A relay on the internet sees each peer's router, or its reverse proxy, and no
+/// file server is reachable there. Announcements are dropped without a word, so
+/// nobody is sent an address that would only cost a connect timeout.
+#[tokio::test]
+async fn a_relay_without_lan_sharing_keeps_the_map_empty() {
+    let relay = Relay::start_with(&["--no-lan-share"]).await;
+    let mut one = relay.join().await;
+    let mut two = relay.join().await;
+
+    announce(&mut one, Some(8788), &["10", "11"]).await;
+
+    // Not an error to the sender, and nothing for anybody else.
+    assert_quiet(&mut one, 21).await;
+    assert_quiet(&mut two, 22).await;
+
+    // A newcomer is told the map is empty, as in any idle room.
+    let mut three = relay.join_with(TOKEN).await;
+    match recv(&mut three).await {
+        ServerMsg::Welcome { .. } => {}
+        other => panic!("expected a welcome, got {other:?}"),
+    }
+    assert!(recv_shares(&mut three).await.is_empty());
 }
 
 #[tokio::test]

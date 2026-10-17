@@ -21,3 +21,6 @@
 
 # Built artifacts for hand-installing
 /dist
+
+# Room password for docker compose
+/.env

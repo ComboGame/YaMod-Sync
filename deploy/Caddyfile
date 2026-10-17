@@ -1,0 +1,5 @@
+# TLS перед релеем: сертификат Let's Encrypt Caddy получает и продлевает сам.
+# WebSocket проксируется без дополнительных настроек.
+{$YMSYNC_DOMAIN} {
+	reverse_proxy relay:8787
+}

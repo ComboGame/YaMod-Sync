@@ -445,6 +445,64 @@ impl YandexMusic {
         Ok(tracks)
     }
 
+    /// Opens a wave session — what the official apps use for «Моя волна».
+    ///
+    /// Unlike [`Self::station_tracks`], a session learns: it is told what
+    /// started, what was played through and what was skipped (see
+    /// [`Self::wave_feedback`]), and the next batch is picked with that in mind.
+    /// `played` lists tracks already heard, as `id` or `id:album`, so they are
+    /// not handed out again.
+    pub async fn wave_session_new(&self, station: &str, played: &[String]) -> Result<WaveBatch> {
+        let body = serde_json::json!({
+            "seeds": [station],
+            "queue": played,
+            "includeTracksInResponse": true,
+        });
+        let session: SessionBatch = self
+            .post_json_result("/rotor/session/new", &body)
+            .await
+            .with_context(|| format!("создание сессии волны {station}"))?;
+        let id = session
+            .radio_session_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .context("Яндекс не прислал id сессии волны")?;
+        session.into_batch(id)
+    }
+
+    /// The next batch of an open wave session.
+    ///
+    /// `played` is what the session has handed out so far; Yandex continues
+    /// after it rather than starting over. A session Yandex has forgotten comes
+    /// back as [`WaveSessionLost`], which the caller answers by opening a new one.
+    pub async fn wave_session_tracks(&self, session: &str, played: &[String]) -> Result<WaveBatch> {
+        let body = serde_json::json!({ "queue": played });
+        let batch: SessionBatch = self
+            .post_json_result(&format!("/rotor/session/{session}/tracks"), &body)
+            .await
+            .context("следующие треки волны")?;
+        if batch.unknown_session || batch.terminated {
+            return Err(anyhow::Error::new(WaveSessionLost));
+        }
+        batch.into_batch(session.to_string())
+    }
+
+    /// Tells a wave session what happened, which is what tunes the next batches.
+    pub async fn wave_feedback(
+        &self,
+        session: &str,
+        batch_id: Option<&str>,
+        event: &WaveEvent,
+    ) -> Result<()> {
+        let body = feedback_body(batch_id, event, &utc_now_iso());
+        let path = format!("/rotor/session/{session}/feedback");
+        let url = format!("{API_BASE}{path}");
+        self.send(self.authorized(self.http.post(&url)).json(&body), &url)
+            .await
+            .with_context(|| format!("отзыв волне ({})", event.kind()))?;
+        Ok(())
+    }
+
     /// Resolves a playable, signed URL for the track's audio.
     pub async fn stream_url(&self, track_id: &str) -> Result<String> {
         let variants: Vec<DownloadInfo> = self
@@ -574,6 +632,29 @@ impl YandexMusic {
             .with_context(|| format!("ответ {path} не является JSON: {}", excerpt(&body)))?;
         let envelope: Envelope<T> = serde_json::from_value(document).with_context(|| {
             format!("неожиданная структура ответа {path}: {}", excerpt(&body))
+        })?;
+        Ok(envelope.result)
+    }
+
+    /// A JSON POST whose answer is wanted, unwrapped like [`Self::get_result`]'s.
+    /// The wave sessions are the only endpoints that take JSON.
+    async fn post_json_result<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let url = format!("{API_BASE}{path}");
+        let text = self
+            .send(self.authorized(self.http.post(&url)).json(body), &url)
+            .await?;
+        let document: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("ответ {path} не является JSON: {}", excerpt(&text)))?;
+        let envelope: Envelope<T> = serde_json::from_value(document).with_context(|| {
+            format!(
+                "неожиданная структура ответа {path} — возможно, неофициальный API \
+                 изменился: {}",
+                excerpt(&text)
+            )
         })?;
         Ok(envelope.result)
     }
@@ -894,6 +975,158 @@ struct StationBatch {
 struct StationEntry {
     #[serde(default)]
     track: Option<Track>,
+}
+
+/// What `/rotor/session/new` and `/rotor/session/{id}/tracks` answer. Only the
+/// new session carries its id; both carry a batch and its tracks.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionBatch {
+    #[serde(default)]
+    radio_session_id: Option<String>,
+    #[serde(default)]
+    batch_id: Option<String>,
+    #[serde(default)]
+    sequence: Vec<StationEntry>,
+    #[serde(default)]
+    terminated: bool,
+    #[serde(default)]
+    unknown_session: bool,
+}
+
+impl SessionBatch {
+    fn into_batch(self, session: String) -> Result<WaveBatch> {
+        let tracks: Vec<Track> = self
+            .sequence
+            .into_iter()
+            .filter_map(|entry| entry.track)
+            .collect();
+        if tracks.is_empty() {
+            bail!("волна не прислала ни одного трека");
+        }
+        Ok(WaveBatch {
+            session,
+            batch_id: self.batch_id,
+            tracks,
+        })
+    }
+}
+
+/// One batch from a wave session.
+#[derive(Debug, Clone)]
+pub struct WaveBatch {
+    /// The session this batch belongs to; feedback goes to it.
+    pub session: String,
+    /// Feedback names the batch the track came from.
+    pub batch_id: Option<String>,
+    pub tracks: Vec<Track>,
+}
+
+/// Yandex no longer knows the session — it expired, or was ended. The answer is
+/// a new one, seeded with what has already been played.
+#[derive(Debug)]
+pub struct WaveSessionLost;
+
+impl std::fmt::Display for WaveSessionLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("сессия волны закончилась на стороне Яндекса")
+    }
+}
+
+impl std::error::Error for WaveSessionLost {}
+
+/// What a wave session is told about the listening.
+///
+/// Track ids are `id` or `id:album`, as the session handed them out.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaveEvent {
+    /// The wave was switched on. Sent once per session.
+    RadioStarted { station: String },
+    TrackStarted { track: String },
+    /// Played to the end, or close enough.
+    TrackFinished { track: String, played_secs: f64 },
+    /// Moved on before the end — the strongest «not this» a listener gives.
+    Skip { track: String, played_secs: f64 },
+}
+
+impl WaveEvent {
+    fn kind(&self) -> &'static str {
+        match self {
+            WaveEvent::RadioStarted { .. } => "radioStarted",
+            WaveEvent::TrackStarted { .. } => "trackStarted",
+            WaveEvent::TrackFinished { .. } => "trackFinished",
+            WaveEvent::Skip { .. } => "skip",
+        }
+    }
+}
+
+/// The feedback body, as the official clients send it.
+fn feedback_body(batch_id: Option<&str>, event: &WaveEvent, timestamp: &str) -> serde_json::Value {
+    let mut inner = serde_json::json!({
+        "type": event.kind(),
+        "timestamp": timestamp,
+    });
+    let mut from = None;
+    match event {
+        WaveEvent::RadioStarted { station } => {
+            from = Some(format!("radio-mobile-{}", station.replace(':', "-")));
+        }
+        WaveEvent::TrackStarted { track } => {
+            inner["trackId"] = track.as_str().into();
+        }
+        WaveEvent::TrackFinished { track, played_secs } | WaveEvent::Skip { track, played_secs } => {
+            inner["trackId"] = track.as_str().into();
+            // Whole milliseconds: a float with fifteen digits after the point
+            // says nothing more and only makes the request harder to read.
+            inner["totalPlayedSeconds"] = ((played_secs * 1000.0).round() / 1000.0).into();
+        }
+    }
+    let mut body = serde_json::json!({ "event": inner });
+    if let Some(batch_id) = batch_id {
+        body["batchId"] = batch_id.into();
+    }
+    if let Some(from) = from {
+        body["from"] = from.into();
+    }
+    body
+}
+
+/// The current UTC time as `2024-01-01T12:00:00.000Z`, the form the feedback
+/// timestamps take.
+fn utc_now_iso() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    iso_from_unix_ms(ms)
+}
+
+fn iso_from_unix_ms(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let millis = ms.rem_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let of_day = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        of_day / 3600,
+        of_day % 3600 / 60,
+        of_day % 60
+    )
+}
+
+/// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
+/// algorithm) — one function rather than a date crate for one timestamp.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1846,6 +2079,81 @@ mod tests {
         assert_eq!(ids, ["152610414", "9"], "an entry without a track is dropped");
         assert_eq!(tracks[0].artist_names(), "NINETRAUMA");
         assert_eq!(tracks[0].duration_ms, 142_100);
+    }
+
+    #[test]
+    fn a_new_wave_session_yields_its_id_batch_and_tracks() {
+        let session: SessionBatch = serde_json::from_str(
+            r#"{
+              "radioSessionId": "abc-123",
+              "batchId": "b1",
+              "pumpkin": false,
+              "sequence": [
+                {"type": "track", "liked": false,
+                 "track": {"id": "10", "title": "A", "albums": [{"id": 7}]}},
+                {"type": "track"}
+              ],
+              "acceptedSeeds": [{"type": "user", "value": "onyourwave"}]
+            }"#,
+        )
+        .unwrap();
+        let id = session.radio_session_id.clone().unwrap();
+        let batch = session.into_batch(id).unwrap();
+        assert_eq!(batch.session, "abc-123");
+        assert_eq!(batch.batch_id.as_deref(), Some("b1"));
+        let ids: Vec<&str> = batch.tracks.iter().map(|t| t.id.0.as_str()).collect();
+        assert_eq!(ids, ["10"]);
+    }
+
+    /// Yandex answers a forgotten session with a flag rather than an error.
+    #[test]
+    fn a_forgotten_session_is_flagged() {
+        let batch: SessionBatch =
+            serde_json::from_str(r#"{"unknownSession": true, "sequence": []}"#).unwrap();
+        assert!(batch.unknown_session);
+    }
+
+    #[test]
+    fn feedback_bodies_match_what_the_official_clients_send() {
+        let ts = "2026-01-02T03:04:05.006Z";
+        let started = feedback_body(
+            Some("b1"),
+            &WaveEvent::RadioStarted {
+                station: WAVE_STATION.to_string(),
+            },
+            ts,
+        );
+        assert_eq!(
+            started,
+            serde_json::json!({
+                "event": {"type": "radioStarted", "timestamp": ts},
+                "batchId": "b1",
+                "from": "radio-mobile-user-onyourwave"
+            })
+        );
+
+        let skip = feedback_body(
+            None,
+            &WaveEvent::Skip {
+                track: "10:7".to_string(),
+                played_secs: 12.345_678,
+            },
+            ts,
+        );
+        assert_eq!(
+            skip,
+            serde_json::json!({
+                "event": {"type": "skip", "timestamp": ts, "trackId": "10:7",
+                          "totalPlayedSeconds": 12.346}
+            })
+        );
+    }
+
+    #[test]
+    fn timestamps_are_iso_8601_utc() {
+        assert_eq!(iso_from_unix_ms(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso_from_unix_ms(951_782_400_123), "2000-02-29T00:00:00.123Z");
+        assert_eq!(iso_from_unix_ms(1_790_000_000_000), "2026-09-21T14:13:20.000Z");
     }
 
     #[test]

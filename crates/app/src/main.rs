@@ -789,7 +789,7 @@ async fn show_rooms(cfg: &Config, wait: Duration) -> Result<()> {
 async fn probe(cfg: &Config, query: &str) -> Result<()> {
     let api = YandexMusic::new(cfg.require_yandex_token()?)?;
 
-    println!("1/5 аккаунт…");
+    println!("1/6 аккаунт…");
     let status = api.account_status().await?;
     let name = if status.account.display_name.is_empty() {
         status.account.login.clone()
@@ -807,7 +807,7 @@ async fn probe(cfg: &Config, query: &str) -> Result<()> {
         println!("    ⚠ без Плюса полные треки недоступны — ниже, скорее всего, будет ошибка");
     }
 
-    println!("2/5 поиск «{query}»…");
+    println!("2/6 поиск «{query}»…");
     let tracks = api.search_tracks(query, 3).await?;
     if tracks.is_empty() {
         bail!("поиск ничего не вернул — проверьте запрос");
@@ -828,15 +828,15 @@ async fn probe(cfg: &Config, query: &str) -> Result<()> {
     }
     let track = &tracks[0];
 
-    println!("3/5 ссылка на поток для [{}]…", track.id);
+    println!("3/6 ссылка на поток для [{}]…", track.id);
     let url = api.stream_url(&track.id.0).await?;
     println!("    подпись принята: {}", api::redact_url(&url));
 
-    println!("4/5 загрузка…");
+    println!("4/6 загрузка…");
     let data = api.fetch_track(&url).await?;
     println!("    {:.1} МиБ", data.len() as f64 / (1024.0 * 1024.0));
 
-    println!("5/5 декодирование…");
+    println!("5/6 декодирование…");
     match Player::probe_decode(data)? {
         Some(duration) => {
             let decoded_ms = duration.as_millis() as u64;
@@ -856,8 +856,70 @@ async fn probe(cfg: &Config, query: &str) -> Result<()> {
         None => println!("    ⚠ декодер не сообщил длительность (переход может быть неточным)"),
     }
 
+    println!("6/6 сессия «Моей волны»…");
+    probe_wave(&api).await?;
+
     println!();
-    println!("готово: токен, поиск, подпись ссылки, загрузка и декодирование работают.");
+    println!("готово: токен, поиск, подпись ссылки, загрузка, декодирование и волна работают.");
+    Ok(())
+}
+
+/// Opens a wave session, tells it the wave started and its first track is
+/// playing, and asks for the next batch — the whole loop the engine runs.
+async fn probe_wave(api: &YandexMusic) -> Result<()> {
+    let first = api.wave_session_new(api::WAVE_STATION, &[]).await?;
+    println!(
+        "    сессия {}, партия {}: {} трек(ов)",
+        first.session,
+        first.batch_id.as_deref().unwrap_or("—"),
+        first.tracks.len()
+    );
+    for track in first.tracks.iter().take(3) {
+        println!("    · {} — {}", track.artist_names(), track.title);
+    }
+
+    let batch_id = first.batch_id.as_deref();
+    api.wave_feedback(
+        &first.session,
+        batch_id,
+        &api::WaveEvent::RadioStarted {
+            station: api::WAVE_STATION.to_string(),
+        },
+    )
+    .await?;
+    let played: Vec<String> = first
+        .tracks
+        .iter()
+        .map(|track| {
+            let track = track.to_track_ref();
+            match track.album_id {
+                Some(album) => format!("{}:{album}", track.track_id),
+                None => track.track_id,
+            }
+        })
+        .collect();
+    if let Some(opening) = played.first() {
+        api.wave_feedback(
+            &first.session,
+            batch_id,
+            &api::WaveEvent::TrackStarted {
+                track: opening.clone(),
+            },
+        )
+        .await?;
+    }
+    println!("    отзывы приняты");
+
+    let next = api.wave_session_tracks(&first.session, &played).await?;
+    let repeated = next
+        .tracks
+        .iter()
+        .filter(|track| first.tracks.iter().any(|seen| seen.id == track.id))
+        .count();
+    println!(
+        "    следующая партия: {} трек(ов), повторов из первой: {repeated}",
+        next.tracks.len()
+    );
     Ok(())
 }
 

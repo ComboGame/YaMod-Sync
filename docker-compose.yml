@@ -1,0 +1,48 @@
+# ymsync-relay на VDS. Гайд: docs/vds-docker.md.
+#
+#   cp .env.example .env    # и впишите пароль комнаты
+#   docker compose up -d --build
+#
+# С доменом и TLS (адрес для клиентов — wss://ваш.домен):
+#   docker compose --profile tls up -d --build
+
+services:
+  relay:
+    build: .
+    image: ymsync-relay:local
+    restart: unless-stopped
+    environment:
+      YMSYNC_ROOM_TOKEN: ${YMSYNC_ROOM_TOKEN:?впишите YMSYNC_ROOM_TOKEN в .env}
+      RUST_LOG: ${RUST_LOG:-ymsync_relay=info}
+    command: ["--bind", "0.0.0.0:8787", "--no-discovery", "--no-lan-share"]
+    ports:
+      # Без TLS — наружу, клиенты пишут ws://IP:8787.
+      # С TLS поставьте в .env RELAY_PUBLISH=127.0.0.1:8787, чтобы снаружи
+      # был виден только Caddy.
+      - "${RELAY_PUBLISH:-8787}:8787"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on: [relay]
+    environment:
+      # Не через `:?`: compose проверяет переменные всех сервисов, даже когда
+      # профиль tls выключен, и без домена отказался бы запускать и сам релей.
+      YMSYNC_DOMAIN: ${YMSYNC_DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

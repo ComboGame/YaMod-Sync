@@ -5921,6 +5921,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ymsync-bridge"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ymsync",
+ "ymsync-proto",
+ "ymsync-relay",
+]
+
+[[package]]
 name = "ymsync-gui"
 version = "0.3.1"
 dependencies = [

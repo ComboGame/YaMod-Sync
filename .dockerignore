@@ -1,0 +1,8 @@
+.git
+target
+dist
+android
+docs
+release-notes
+crates/android/jniLibs
+.env

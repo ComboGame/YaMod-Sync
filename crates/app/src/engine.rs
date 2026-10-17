@@ -31,7 +31,7 @@ use ymsync_proto::{
 };
 
 use crate::albums;
-use crate::api::{Track, YandexMusic};
+use crate::api::{Track, WaveEvent, WaveSessionLost, YandexMusic};
 use crate::cache::{Cache, Insertion};
 use crate::config::Config;
 use crate::likes::Likes;
@@ -462,6 +462,14 @@ enum Internal {
     Station {
         tracks: Vec<TrackRef>,
         error: Option<String>,
+        /// The wave session the batch came from; `None` from the old endpoint.
+        session: Option<String>,
+        batch_id: Option<String>,
+        /// The session was opened by this request, so Yandex has to be told
+        /// the wave started.
+        fresh: bool,
+        /// The session API failed and the old endpoint answered instead.
+        legacy: bool,
     },
     /// The next track, fetched before the room got to it. `None` means the fetch
     /// failed; nothing is reported, since the ordinary load will try again and
@@ -543,6 +551,177 @@ struct Station {
     /// rather than switched on here. Losing such a claim is somebody else doing
     /// the same job, so it is not worth telling the user about.
     adopted: bool,
+    /// The wave session this peer is feeding from. See [`WaveSession`].
+    wave: WaveSession,
+}
+
+impl Station {
+    fn new(id: String, replace_first: bool, adopted: bool) -> Self {
+        Self {
+            id,
+            after: None,
+            claimed: false,
+            replace_first,
+            adopted,
+            wave: WaveSession::default(),
+        }
+    }
+}
+
+/// How many handed-out tracks a session is reminded of, so it does not repeat
+/// them. The official clients send a similar tail rather than everything.
+const WAVE_MEMORY: usize = 150;
+
+/// A track played at least this close to its end counts as listened through.
+const WAVE_FINISHED_SLACK_MS: i64 = 5_000;
+
+/// Feedback for a wave session: the session, the batch, what happened.
+type WaveReport = (String, Option<String>, WaveEvent);
+
+/// What makes «Моя волна» learn, the way it does in the official apps.
+///
+/// The old station endpoint hands out batches and is never told what happened
+/// to them, so it has nothing to go on and keeps circling the same few artists.
+/// A session is told when a track started, whether it was played through or
+/// skipped and how far in — and the next batch is chosen with that in mind.
+///
+/// Only the feeder holds one: the session belongs to its account, and every
+/// skip, whoever in the room pressed it, reaches the feeder as a new room state.
+#[derive(Default)]
+struct WaveSession {
+    /// Yandex's id for the session, once one is open.
+    id: Option<String>,
+    /// The session API failed; the old endpoint is used for this station.
+    legacy: bool,
+    /// What the session handed out, as `id:album`, oldest first.
+    played: VecDeque<String>,
+    /// Room track id → (the id the session knows it by, the batch it came in).
+    handed: HashMap<String, (String, Option<String>)>,
+    /// Feedback goes out one at a time, in order, from a task of its own. The
+    /// task ends when the station is dropped.
+    reports: Option<mpsc::UnboundedSender<WaveReport>>,
+}
+
+impl WaveSession {
+    /// Records a batch, keeping only the last [`WAVE_MEMORY`] tracks.
+    fn remember(&mut self, tracks: &[TrackRef], batch_id: &Option<String>) {
+        for track in tracks {
+            let known_as = wave_track_id(track);
+            self.played.push_back(known_as.clone());
+            self.handed
+                .insert(track.track_id.clone(), (known_as, batch_id.clone()));
+        }
+        while self.played.len() > WAVE_MEMORY {
+            let Some(gone) = self.played.pop_front() else {
+                break;
+            };
+            if !self.played.contains(&gone) {
+                let room_id = gone.split(':').next().unwrap_or_default();
+                self.handed.remove(room_id);
+            }
+        }
+    }
+
+    /// Queues one event for the session, if there is one and the track is one
+    /// of its own. A track somebody added by hand is none of the wave's business.
+    fn report(&self, track_id: &str, event: impl FnOnce(String) -> WaveEvent) {
+        let (Some(session), Some(reports)) = (self.id.as_ref(), self.reports.as_ref()) else {
+            return;
+        };
+        let Some((known_as, batch_id)) = self.handed.get(track_id) else {
+            return;
+        };
+        let _ = reports.send((session.clone(), batch_id.clone(), event(known_as.clone())));
+    }
+}
+
+/// A track as a wave session names it: `id:album`, or the bare id.
+fn wave_track_id(track: &TrackRef) -> String {
+    match track.album_id.as_deref() {
+        Some(album) if !album.is_empty() => format!("{}:{album}", track.track_id),
+        _ => track.track_id.clone(),
+    }
+}
+
+/// Whether a track the room moved off was played through or skipped.
+fn wave_outcome(track: String, position_ms: i64, duration_ms: u64) -> WaveEvent {
+    let duration = duration_ms as i64;
+    let played = position_ms.clamp(0, duration.max(0));
+    let played_secs = played as f64 / 1000.0;
+    if duration > 0 && played + WAVE_FINISHED_SLACK_MS >= duration {
+        WaveEvent::TrackFinished { track, played_secs }
+    } else {
+        WaveEvent::Skip { track, played_secs }
+    }
+}
+
+/// One batch for a station: from its wave session when that works, from the old
+/// endpoint when it does not.
+struct StationBatch {
+    tracks: Vec<Track>,
+    session: Option<String>,
+    batch_id: Option<String>,
+    fresh: bool,
+    legacy: bool,
+}
+
+async fn station_batch(
+    api: &YandexMusic,
+    station: &str,
+    session: Option<String>,
+    legacy: bool,
+    after: Option<String>,
+    played: Vec<String>,
+) -> Result<StationBatch> {
+    if !legacy {
+        let attempt = match session {
+            Some(session) => match api.wave_session_tracks(&session, &played).await {
+                Err(err) if err.downcast_ref::<WaveSessionLost>().is_some() => {
+                    debug!("wave session {session} is gone; opening a new one");
+                    api.wave_session_new(station, &played).await.map(|b| (b, true))
+                }
+                other => other.map(|b| (b, false)),
+            },
+            None => api.wave_session_new(station, &played).await.map(|b| (b, true)),
+        };
+        match attempt {
+            Ok((batch, fresh)) => {
+                return Ok(StationBatch {
+                    tracks: batch.tracks,
+                    session: Some(batch.session),
+                    batch_id: batch.batch_id,
+                    fresh,
+                    legacy: false,
+                });
+            }
+            // The old endpoint still plays; it only does not learn. Better that
+            // than a wave that stops.
+            Err(err) => warn!("сессия волны недоступна, беру треки по-старому: {err:#}"),
+        }
+    }
+    let tracks = api.station_tracks(station, after.as_deref()).await?;
+    Ok(StationBatch {
+        tracks,
+        session: None,
+        batch_id: None,
+        fresh: false,
+        legacy: true,
+    })
+}
+
+/// Sends a session's feedback in order, until the station is dropped.
+fn spawn_wave_reports(api: Arc<YandexMusic>) -> mpsc::UnboundedSender<WaveReport> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<WaveReport>();
+    tokio::spawn(async move {
+        while let Some((session, batch_id, event)) = rx.recv().await {
+            // Feedback that does not arrive costs the wave a little of its
+            // aim, nothing more: it is never worth interrupting the music over.
+            if let Err(err) = api.wave_feedback(&session, batch_id.as_deref(), &event).await {
+                debug!("wave feedback was not accepted: {err:#}");
+            }
+        }
+    });
+    tx
 }
 
 /// Why a track did not start.
@@ -803,13 +982,7 @@ impl Engine {
 
             Command::PlayStation { id, replace } => {
                 self.notice = Some("настраиваю волну…".to_string());
-                self.station = Some(Station {
-                    id,
-                    after: None,
-                    claimed: false,
-                    replace_first: replace,
-                    adopted: false,
-                });
+                self.station = Some(Station::new(id, replace, false));
                 self.refilling = false;
                 self.request_station_tracks(internal);
             }
@@ -1039,16 +1212,27 @@ impl Engine {
         let internal = internal.clone();
         let id = station.id.clone();
         let after = station.after.clone();
+        let session = station.wave.id.clone();
+        let legacy = station.wave.legacy;
+        let played: Vec<String> = station.wave.played.iter().cloned().collect();
 
         tokio::spawn(async move {
-            let message = match api.station_tracks(&id, after.as_deref()).await {
-                Ok(tracks) => Internal::Station {
-                    tracks: tracks.iter().map(Track::to_track_ref).collect(),
+            let message = match station_batch(&api, &id, session, legacy, after, played).await {
+                Ok(batch) => Internal::Station {
+                    tracks: batch.tracks.iter().map(Track::to_track_ref).collect(),
                     error: None,
+                    session: batch.session,
+                    batch_id: batch.batch_id,
+                    fresh: batch.fresh,
+                    legacy: batch.legacy,
                 },
                 Err(err) => Internal::Station {
                     tracks: Vec::new(),
                     error: Some(format!("{err:#}")),
+                    session: None,
+                    batch_id: None,
+                    fresh: false,
+                    legacy: false,
                 },
             };
             let _ = internal.send(message);
@@ -1352,7 +1536,14 @@ impl Engine {
 
     fn handle_internal(&mut self, message: Internal, internal: &mpsc::UnboundedSender<Internal>) {
         match message {
-            Internal::Station { tracks, error } => {
+            Internal::Station {
+                tracks,
+                error,
+                session,
+                batch_id,
+                fresh,
+                legacy,
+            } => {
                 self.refilling = false;
                 // The wave was switched off while the request was out.
                 let Some(station) = self.station.as_mut() else {
@@ -1385,6 +1576,28 @@ impl Engine {
                 }
 
                 station.after = tracks.last().map(|t| t.track_id.clone());
+                // Before the queue goes out: the room's answer to it is what
+                // reports the first track as started, and by then the session
+                // has to know the track is one of its own.
+                station.wave.legacy = legacy;
+                if let Some(session) = session {
+                    if station.wave.reports.is_none()
+                        && let Some(api) = self.api.clone()
+                    {
+                        station.wave.reports = Some(spawn_wave_reports(api));
+                    }
+                    if fresh && let Some(reports) = station.wave.reports.as_ref() {
+                        let _ = reports.send((
+                            session.clone(),
+                            batch_id.clone(),
+                            WaveEvent::RadioStarted {
+                                station: station.id.clone(),
+                            },
+                        ));
+                    }
+                    station.wave.id = Some(session);
+                }
+                station.wave.remember(&tracks, &batch_id);
                 let replace = std::mem::take(&mut station.replace_first);
                 let claim = if station.claimed {
                     None
@@ -1695,21 +1908,16 @@ impl Engine {
                     && let Some(id) = state.station.clone()
                 {
                     self.notice = Some("подхватываю волну".to_string());
-                    self.station = Some(Station {
-                        id,
-                        // The wave picks up wherever it likes; what matters is
-                        // that the queue keeps growing.
-                        after: None,
-                        claimed: false,
-                        // Joining the queue, never replacing it: the room is
-                        // playing, and a replacing queue would also clear the
-                        // very station being claimed.
-                        replace_first: false,
-                        adopted: true,
-                    });
+                    // Joining the queue, never replacing it: the room is
+                    // playing, and a replacing queue would also clear the very
+                    // station being claimed. The wave picks up wherever it
+                    // likes; what matters is that the queue keeps growing.
+                    self.station = Some(Station::new(id, false, true));
                     self.refilling = false;
                     self.request_station_tracks(internal);
                 }
+
+                self.report_wave_transition(&state);
 
                 if let Some(track) = state.track.clone() {
                     let staged = self.player.current_track_id();
@@ -1865,6 +2073,47 @@ impl Engine {
             self.reported_barrier = Some(barrier);
         } else {
             self.connected = false;
+        }
+    }
+
+    /// Tells the wave session what the room just did, when it moved to another
+    /// track: the one it left was played through or skipped, and the new one
+    /// started.
+    ///
+    /// Read off the room's state rather than off this player, so a skip pressed
+    /// by anybody in the room counts, and a track that failed to load here still
+    /// gets reported the way the room heard it.
+    fn report_wave_transition(&self, next: &PlaybackState) {
+        let Some(station) = self.station.as_ref() else {
+            return;
+        };
+        if station.wave.id.is_none() {
+            return;
+        }
+        let previous = self.remote.as_ref();
+        let left = previous.and_then(|state| state.track.as_ref());
+        let entered = next.track.as_ref();
+        if left.map(|t| &t.track_id) == entered.map(|t| &t.track_id) {
+            return;
+        }
+
+        if let (Some(previous), Some(left)) = (previous, left) {
+            let position = self
+                .link
+                .clock()
+                .now_server_ms()
+                .map_or(previous.position_ms as i64, |now| {
+                    target_position_ms(previous, now)
+                });
+            let duration = left.duration_ms;
+            station
+                .wave
+                .report(&left.track_id, |known_as| wave_outcome(known_as, position, duration));
+        }
+        if let Some(entered) = entered {
+            station
+                .wave
+                .report(&entered.track_id, |track| WaveEvent::TrackStarted { track });
         }
     }
 
@@ -2471,6 +2720,84 @@ fn requested_position(audible_ms: u64, bias_ms: i64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wave_track(id: &str, album: Option<&str>) -> TrackRef {
+        TrackRef {
+            track_id: id.to_string(),
+            album_id: album.map(str::to_string),
+            album: None,
+            title: format!("Title {id}"),
+            artist: "Artist".to_string(),
+            duration_ms: 200_000,
+            cover_uri: None,
+        }
+    }
+
+    /// A wave session knows its tracks as `id:album`, the way it handed them out.
+    #[test]
+    fn a_wave_track_is_named_with_its_album() {
+        assert_eq!(wave_track_id(&wave_track("10", Some("7"))), "10:7");
+        assert_eq!(wave_track_id(&wave_track("10", None)), "10");
+        assert_eq!(wave_track_id(&wave_track("10", Some(""))), "10");
+    }
+
+    /// The relay moves on a little after the end, and a skip in the last
+    /// seconds is as good as a listen; anything earlier tells the wave «не то».
+    #[test]
+    fn leaving_a_track_near_its_end_counts_as_finished() {
+        let outcome = wave_outcome("1".into(), 197_000, 200_000);
+        assert!(matches!(outcome, WaveEvent::TrackFinished { played_secs, .. } if played_secs == 197.0));
+
+        // Past the end — the relay's ticker is late — is clamped, not reported
+        // as more than the track is long.
+        let outcome = wave_outcome("1".into(), 260_000, 200_000);
+        assert!(matches!(outcome, WaveEvent::TrackFinished { played_secs, .. } if played_secs == 200.0));
+
+        let outcome = wave_outcome("1".into(), 30_000, 200_000);
+        assert!(matches!(outcome, WaveEvent::Skip { played_secs, .. } if played_secs == 30.0));
+
+        // A clock that ran backwards still yields a sane figure.
+        let outcome = wave_outcome("1".into(), -500, 200_000);
+        assert!(matches!(outcome, WaveEvent::Skip { played_secs, .. } if played_secs == 0.0));
+    }
+
+    /// Only what the session handed out is reported, and it is named the way
+    /// the session knows it, with the batch it came in.
+    #[tokio::test]
+    async fn only_the_sessions_own_tracks_are_reported() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut wave = WaveSession {
+            id: Some("s1".to_string()),
+            reports: Some(tx),
+            ..WaveSession::default()
+        };
+        wave.remember(&[wave_track("10", Some("7"))], &Some("b1".to_string()));
+
+        wave.report("10", |track| WaveEvent::TrackStarted { track });
+        wave.report("99", |track| WaveEvent::TrackStarted { track });
+
+        let (session, batch, event) = rx.recv().await.expect("one report");
+        assert_eq!(session, "s1");
+        assert_eq!(batch.as_deref(), Some("b1"));
+        assert_eq!(event, WaveEvent::TrackStarted { track: "10:7".to_string() });
+        assert!(rx.try_recv().is_err(), "a track added by hand is not reported");
+    }
+
+    /// The session is reminded of a bounded tail, and what falls off it is no
+    /// longer reported either.
+    #[test]
+    fn a_wave_remembers_a_bounded_tail() {
+        let mut wave = WaveSession::default();
+        let tracks: Vec<TrackRef> = (0..WAVE_MEMORY + 10)
+            .map(|n| wave_track(&n.to_string(), Some("1")))
+            .collect();
+        wave.remember(&tracks, &None);
+        assert_eq!(wave.played.len(), WAVE_MEMORY);
+        assert_eq!(wave.played.front().map(String::as_str), Some("10:1"));
+        assert!(!wave.handed.contains_key("0"));
+        assert!(wave.handed.contains_key("10"));
+        assert_eq!(wave.handed.len(), WAVE_MEMORY);
+    }
 
     /// The report that prompted this: a phone with no internet, a PC in the room
     /// holding the track, and a fetch from that PC that failed. Calling it
