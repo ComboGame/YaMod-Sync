@@ -38,7 +38,7 @@ deploy/, Dockerfile, docker-compose.yml, docs/server.md   развёртыван
 ## Команды
 
 ```bash
-cargo test --workspace                  # 260+ тестов, включая сквозной тест моста (crates/bridge/tests)
+cargo test --workspace                  # 270+ тестов, включая сквозные тесты моста (crates/bridge/tests)
 cargo build --release -p ymsync-relay   # сервер
 ```
 
@@ -58,7 +58,11 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
 - Линта, тестов и проверки типов для TS нет. TypeScript только в peerDependencies, а `bunx tsc` тянет
   последнюю версию, где `baseUrl` из `tsconfig.json` уже удалён; `include: ./**/*` захватывает и `.versions`.
   Проверять свои файлы — временным tsconfig (extends `mod/tsconfig.json`, узкий `include`, `typeRoots`
-  на `mod/node_modules/@types`) и TypeScript 5: `bunx -p typescript@5 tsc -p <temp>.json`.
+  на `mod/node_modules/@types`) и TypeScript 5: `npx -y -p typescript@5.9.3 tsc -p <temp>.json`
+  (`bunx` 1.1.27 портит аргументы `-p`).
+- Отладка из devtools/CDP: `window.__yandexSync` (`connect`, `command`, `getSyncState`, `snapshot`, `stats`).
+  UI — в shadow-корнях: `document.getElementById("yandex-music-sync-root").shadowRoot`, кнопка в шапке —
+  shadowRoot у `#mod-sheet-container`. Лог моста подробнее: `RUST_LOG=ymsync=debug` (видно отправленный фидбек волны).
 - `PRETTIFY=true` — прогнать prettier по пропатченной сборке (медленно).
 
 ## Синхрон
@@ -70,19 +74,30 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
 - Позиция — якорь `position_ms` на момент `at_server_ms` (часы релея); `target_position_ms()` экстраполирует.
 - Новый трек ждёт `ready` от всех (`READY_TIMEOUT_MS` 15 с), старт с запасом `START_LEAD_MS` 300 мс.
   Пустая комната замораживает позицию и живёт 12 ч.
-- Коррекция (`proto::decide`): только seek, порог 300 мс, опережение 40 мс, cooldown 2 с (`engine::SEEK_COOLDOWN`).
-  `Resume` (комната играет, плеер стоит) всегда делает seek + play.
-- Станция («Моя волна»): её «кормит» участник, который её включил (`feeding`), батчами по мере
-  приближения к концу очереди (`STATION_LEAD` 2). Ушёл — `station_unfed`, подхватывает любой со своего аккаунта.
-  Волна идёт через `rotor/session/new|tracks|feedback`, события radioStarted/trackStarted/trackFinished/skip
-  (`core/src/api.rs`, `engine.rs::WaveSession`); при ошибке — старый `rotor/station/.../tracks`.
+- Коррекция (`proto::decide_with`): у бэкенда со скоростью (`Playback::supports_rate`, это мост) расхождение
+  до 1,5 с закрывается скоростью (`NudgeParams`: мёртвая зона 15 мс, 4 мс на 1‰, максимум ±5%, высота тона
+  сохраняется), seek — только дальше 1,5 с; продолжение рядом с комнатой — `Correction::Play` без seek.
+  Без скорости — как раньше: seek > 300 мс, опережение 40 мс, cooldown 2 с (`engine::SEEK_COOLDOWN`).
+- Барьер на треке, который плеер уже играет сам (автопереход в конце предыдущего), не ставит паузу, пока
+  позиция < 2 с (`BARRIER_HEAD_START_MS`); фору забирает скорость. Скорость сбрасывается при загрузке трека.
+- Станция — волна, которую «кормит» включивший её участник (`feeding`) со своего аккаунта, батчами по мере
+  приближения к концу очереди (`STATION_LEAD` 2). Строка станции на релее — JSON `StationSpec`
+  (`core/src/station.rs`: `seeds`, `name`, `description`, `by`); голый сид от старых версий тоже читается.
+  `Command::PlayWave {seeds}` — «Моя волна» (без сидов) или пресет (`genre:rnb`, `artist:…`, `mood:…`,
+  `activity:…`, `diversity:…`). Сессия: `rotor/session/new` с сидами и `includeWaveModel` (оттуда название),
+  `…/tracks`, `…/feedback`; события radioStarted/trackStarted/trackFinished/skip и like/unlike/dislike/undislike
+  (`Command::WaveFeedback`, только от того, кто кормит). При ошибке — старый `rotor/station/<сид>/tracks`.
+- Включивший вышел → `station_unfed`: очередь доигрывает, волну никто не подхватывает сам; в снапшоте
+  `station_unfed`, в панели — «Продолжить со своего аккаунта» (новый `PlayWave` с теми же сидами).
 
 ### Мост ↔ мод (`crates/bridge/src/protocol.rs`)
 
 - Мод → мост: `start {config}`, `stop`, `quit`, `command {command: {c: ...}}`, `player {state}` (каждые 200 мс),
-  `loaded {result}`.
+  `loaded {result}`. Команды: `toggle`, `next`, `prev`, `seek`, `index`, `set_queue`, `enqueue`, `play_next`,
+  `wave {seeds?}`, `stop_wave`, `wave_feedback {kind: like|unlike|dislike|undislike, track_id}`, `repeat`,
+  `shuffle`, `name`, `like`.
 - Мост → мод: `status {state: stopped|connecting|connected|reconnecting, error?}`, `snapshot` (≤4/с, сразу при
-  смене очереди), `player {op: load|play|pause|seek}`.
+  смене очереди), `player {op: load|play|pause|seek|rate}`.
 - `RemotePlayback::load` ждёт `loaded` до 15 с; позиция экстраполируется между отчётами (не дольше 2 с).
 - Повторный `start` с той же конфигурацией (перезагруженное окно) → заново `connected`, снапшот и `load`.
 - IPC: `yandexSync.start|stop` (invoke), `yandexSync.command|player|loaded` (send), события `yandexSync.event`.
@@ -98,13 +113,21 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
 - Electron зафиксирован 38.2.2 (как у клиента 5.122). В asar есть приватный `@yandex-music-int/...` — не ставить
   зависимости клиента через npm, node_modules берутся из asar.
 - Фасад плеера Sonata (`sonata.ts::player`): объект в `memoizedState` хука с `playbackController`, `setContext`,
-  `setProgress`, `getState`. Используются `setContext`, `setEntityByIndex`, `setProgress(сек)`, `play`, `resume`,
-  `pause`, `getState().playerState.{status,progress}`, `queueState.{currentEntity,entityList,index}`,
+  `setProgress`, `getState`. Используются `setContext`, `setEntityByIndex`, `setProgress(сек)`, `setSpeed(x)`,
+  `play`, `resume`, `pause`, `getState().playerState.{status,progress}`, `queueState.{currentEntity,entityList,index}`,
   `currentContext`. Треки ставятся как `{type:"unloaded", meta:{id}}` в контексте `various` с id `ymsync-room-<rev>`.
+- `setEntityByIndex`/`setContext` завершаются раньше подмены источника звука (~0,4 с плеер показывает новый id,
+  но длительность и звук старого трека): `loaded` уходит только после `waitUntilOn` (длительность совпала с
+  треком очереди или 0). Иначе play/seek ядра доставались старому треку.
 - Позиция Sonata обновляется раз в ~265 мс → `progress.onChange` + досчёт (`livePositionMs`).
 - Действия пользователя ловятся перехватом методов фасада (`controller.ts::INTERCEPTS`); свои вызовы — в `asMod()`
   (флаг только на синхронную часть вызова). Аргумент «id воспроизведения» = трейлер/клип, не трогать.
-- `playContext` с `contextData.type === "vibe"` в комнате блокируется и превращается в волну комнаты.
+- `playContext` с `contextData.type === "vibe"` в комнате блокируется и превращается в волну комнаты с его
+  `seeds`. Пресеты на странице волны — элементы с `item.{id,title,description,seeds}`.
+- Лайк/дизлайк клиента: `POST users/{uid}/likes|dislikes/tracks/add?track-id=id:album` и
+  `…/tracks/{id}/remove`; ловятся `onYandexApiRequest` (fetch-перехватчик мода). Дизлайк клиент сам скипает
+  через `moveForward` (он и становится «next» для комнаты). Кнопки — `DISLIKE_BUTTON`/`LIKE_BUTTON`
+  на панели `VIBE_PLAYERBAR` (главная) и `PLAYERBAR_DESKTOP`.
 - Токен — `localStorage.oauth`. DOM: `section[data-test-id="PLAYERBAR_DESKTOP"]`,
   `div[class*="NavbarDesktopUserWidget_userProfileContainer"]`.
 - Пока в комнате, фоновый троттлинг окна выключен (`webContents.setBackgroundThrottling(false)`), иначе
@@ -115,20 +138,31 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
 - Rust: комментарии и doc-комментарии по-английски, объясняют «почему»; сообщения пользователю по-русски.
   Тест на каждое поведение, имена тестов — предложения (`a_late_answer_for_an_old_track_is_ignored`).
 - Мод: комментарии по-русски, строгий TS, `neverthrow` в API-хелперах, `import type` для типов
-  (Vite/rolldown иначе падает). UI — shadcn/Radix + Tailwind 4, токены цвета через `var(--ym-*)` клиента.
+  (Vite/rolldown иначе падает).
+- UI — React + shadcn/Radix + Tailwind 4 в Shadow DOM (`ui/lib/shadow.tsx`): панель (`#yandex-music-sync-root`)
+  и кнопка в шапке (`#mod-sheet-container`) — отдельные shadow-корни с копией CSS. Порталы Radix — через
+  `usePortalContainer()`. Шрифт Inter объявлен в документе под именем «YMSync Inter» (в shadow-корне
+  @font-face не работает). @property Tailwind в shadow-корне не применяются — `withPropertyDefaults` дублирует
+  их начальные значения. Правки самого клиента — только в `ui/client-tweaks.ts`.
+- Дизайн-токены — OLED-тема Modrinth (`--ms-*` в `ui/index.css`: поверхности `#000`→`#25262b`, бренд `#1bd96a`,
+  текст `#fff/#b0bac5/#96a2b0`, радиусы 0,25–1,25rem, Inter); токены shadcn сопоставлены с ними.
+- Анимации — Anime.js 4 (`ui/lib/motion.ts`: `animate`, `stagger`, `ease: "outQuart"`), только transform/opacity,
+  150–250 мс, при `prefers-reduced-motion` — ничего.
 - Тексты интерфейса — по-русски, предложениями, без капса.
 - Коммиты: короткий заголовок по-английски, как в истории репозитория.
 
 ## Известные проблемы и грабли
 
-- Обрывы звука при синхроне: seek-only коррекция и `Resume` с seek рассчитаны на трек в памяти, а у Sonata
-  каждый seek — перебуферизация; буферизация отчитывается как `playing`; смена трека через
-  pause→setEntityByIndex→pause→setProgress(0) + барьер.
-- Пресеты волны (seeds) теряются — любой `vibe` становится `user:onyourwave`; like/dislike в сессию волны не идут.
-- Стили мода не изолированы: Tailwind preflight и `* { border-border; outline-ring }` глобальные,
-  `ThemeContext` вешает `dark`/`light` на `<html>`.
+- После естественного перехода на следующий трек плеер начинает его ~0,4 с раньше комнаты; расхождение
+  уходит скоростью за ~10 с (до ±5% темпа). Старт волны — несколько секунд (сессия + резолв трека + барьер).
+- Фидбек волны от остальных участников не идёт (решение: только владелец волны); их дизлайк = пропуск.
 - В сборке остаётся отладочный `window.__yandexSync` (+ `stats`).
-- Discord RPC опрашивает окно `executeJavaScript` 2 раза/с; ip-checker ходит на `http://ip-api.com`.
+- Discord RPC опрашивает окно `executeJavaScript` 2 раза/с и читает `PLAYERBAR_DESKTOP` (на главной её нет —
+  тогда статус пустой); ip-checker ходит на `http://ip-api.com`.
 - «Ссылка на Мою коллекцию» без предупреждения делает коллекцию публичной.
+- sonner вставляет свои стили в `document.head` (селекторы `[data-sonner-*]` и `--toast-*` на `<html>`): клиент
+  не меняется, но это единственный чужой CSS в документе.
 - Окружение Windows: в Git Bash `/usr/bin/link` перекрывает MSVC `link.exe` — cargo собирать из PowerShell.
   Bun 1.1.27 не умеет `format: "cjs"` в `Bun.build` → main/preload собираются esbuild. Vite держать на 7.x.
+- При живой проверке через CDP установленная «Яндекс Музыка Sync» должна быть закрыта (один профиль,
+  single-instance lock), а `ELECTRON_RUN_AS_NODE` снят.
