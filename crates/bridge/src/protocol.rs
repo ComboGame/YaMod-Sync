@@ -47,6 +47,10 @@ pub struct StartConfig {
     /// Constant lag of the app's playhead report, if one turns out to exist.
     #[serde(default)]
     pub position_bias_ms: i64,
+    /// Where the Yandex API is; empty for Yandex's own. Only the tests set it,
+    /// to answer for Yandex and see what the wave asks for.
+    #[serde(default)]
+    pub api_base: String,
 }
 
 fn default_host_port() -> u16 {
@@ -99,6 +103,15 @@ pub struct PlayerReport {
     /// The track has played to its end.
     #[serde(default)]
     pub ended: bool,
+    /// The player is on the room's queue, not on something the listener just
+    /// started in the app. Only then does another track mean it wandered off:
+    /// a queue of the listener's own is about to become the room's.
+    #[serde(default = "yes")]
+    pub ours: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// The app's answer to [`PlayerOp::Load`].
@@ -118,8 +131,16 @@ pub enum Output {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// The engine's snapshot, minus the cache lists nobody here draws.
+    /// The engine's snapshot, minus the cache lists nobody here draws and the
+    /// queue, which goes out on its own.
     Snapshot { snapshot: serde_json::Value },
+    /// The room's queue, sent only when it changes. A wave's queue grows by a
+    /// batch every few tracks; sending all of it with every snapshot, four times
+    /// a second, cost the window more than everything else put together.
+    Queue {
+        revision: u64,
+        tracks: Vec<TrackRef>,
+    },
     Player {
         #[serde(flatten)]
         op: PlayerOp,
@@ -137,16 +158,38 @@ pub enum SessionState {
 }
 
 /// An instruction for the app's player.
+///
+/// Play, pause and seek name the track they are meant for. The app's player can
+/// move to another track on its own, and an instruction that arrives after it
+/// did would otherwise act on whatever it plays now — a seek meant for the end
+/// of one track throwing the next one to its end. The app drops an instruction
+/// for a track it is not on; the bridge sees the mismatch and stages the track
+/// again.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum PlayerOp {
-    Load { track: TrackRef },
-    Play,
-    Pause,
-    Seek { ms: u64 },
+    Load {
+        track: TrackRef,
+    },
+    Play {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        track_id: Option<String>,
+    },
+    Pause {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        track_id: Option<String>,
+    },
+    Seek {
+        ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        track_id: Option<String>,
+    },
     /// Play at this fraction of normal speed, pitch kept: how small drift is
-    /// closed without a seek.
-    Rate { rate: f32 },
+    /// closed without a seek. For the player rather than a track, so that a
+    /// return to normal speed always applies.
+    Rate {
+        rate: f32,
+    },
 }
 
 #[cfg(test)]
@@ -200,15 +243,24 @@ mod tests {
         };
         assert_eq!(state.track_id.as_deref(), Some("42"));
         assert!(!state.ended);
+        assert!(state.ours, "a report that does not say is about the room's queue");
     }
 
     #[test]
     fn player_ops_flatten_into_the_message() {
         let text = serde_json::to_string(&Output::Player {
-            op: PlayerOp::Seek { ms: 9 },
+            op: PlayerOp::Seek {
+                ms: 9,
+                track_id: Some("42".to_string()),
+            },
         })
         .unwrap();
-        assert_eq!(text, r#"{"t":"player","op":"seek","ms":9}"#);
+        assert_eq!(text, r#"{"t":"player","op":"seek","ms":9,"track_id":"42"}"#);
+        let text = serde_json::to_string(&Output::Player {
+            op: PlayerOp::Play { track_id: None },
+        })
+        .unwrap();
+        assert_eq!(text, r#"{"t":"player","op":"play"}"#);
         let text = serde_json::to_string(&Output::Player {
             op: PlayerOp::Rate { rate: 0.95 },
         })

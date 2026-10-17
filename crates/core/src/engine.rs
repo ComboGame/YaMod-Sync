@@ -88,6 +88,16 @@ const SEEK_COOLDOWN: Duration = Duration::from_secs(2);
 /// small enough to play back.
 const BARRIER_HEAD_START_MS: i64 = 2_000;
 
+/// How close to its end the room's track has to be for a player already on the
+/// next track to be left there: it is a moment ahead, not lost.
+const AHEAD_OF_ROOM_MS: i64 = 3_000;
+
+/// How often a track a player keeps leaving is put back: quickly at first, then
+/// rarely, so a player that cannot hold it is not fought on every tick.
+const RESTAGE_GAP: Duration = Duration::from_secs(2);
+const RESTAGE_SLOW_GAP: Duration = Duration::from_secs(10);
+const RESTAGE_QUICK_TRIES: u8 = 3;
+
 /// How long a notice stays in the snapshot.
 ///
 /// Notices report events — a peer joining, a track skipped. Without an expiry
@@ -190,7 +200,7 @@ pub enum WaveFeedbackKind {
 pub struct Snapshot {
     pub connected: bool,
     pub peers: usize,
-    pub queue: Vec<TrackRef>,
+    pub queue: Arc<Vec<TrackRef>>,
     /// Bumped on every queue change, so a front end can skip redrawing it.
     pub queue_revision: u64,
     pub index: usize,
@@ -258,6 +268,39 @@ pub struct Snapshot {
     pub waiting: bool,
     /// Last thing worth telling the user about.
     pub notice: Option<String>,
+    /// What the room means to be doing — playing, or not — as the relay last
+    /// said; `None` before it has said anything. Not the same as `playing`,
+    /// which is what this player does: the two differ while a track loads,
+    /// while the room waits for everyone, and when this player has wandered.
+    pub room_playing: Option<bool>,
+    /// The track this player is actually on, which can differ from `track` for
+    /// a moment — it moved on by itself — or until it is put back.
+    pub local_track: Option<String>,
+    /// Whether the player's own word about itself is current. When it is not,
+    /// `playing` is a guess and a front end should not present it as fact.
+    pub local_live: bool,
+    pub latency: Latency,
+}
+
+/// Where the time goes between pressing a button and hearing it, measured
+/// rather than guessed. Every figure is the most recent one, in milliseconds,
+/// and `None` until there is one.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct Latency {
+    /// Best round trip to the relay in the clock's window: how far the room's
+    /// clock is trusted.
+    pub rtt_ms: Option<i64>,
+    /// The latest probe's round trip, which shows a congested moment that the
+    /// best one hides.
+    pub rtt_last_ms: Option<i64>,
+    /// From asking the relay for a change to its answer arriving here.
+    pub command_ms: Option<i64>,
+    /// How long the room's latest state took from the relay to this peer.
+    pub delivery_ms: Option<i64>,
+    /// From the room naming a new track to the player having it.
+    pub load_ms: Option<i64>,
+    /// How long the room last held a new track until everybody had it.
+    pub barrier_ms: Option<i64>,
 }
 
 /// One person in the room, as a front end lists them.
@@ -370,7 +413,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
     let (snapshots, snapshot_rx) = watch::channel(Snapshot {
         connected: true,
         peers,
-        queue: Vec::new(),
+        queue: Arc::new(Vec::new()),
         queue_revision: 0,
         index: 0,
         track: None,
@@ -402,6 +445,10 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         shuffle: false,
         waiting: false,
         notice: None,
+        room_playing: None,
+        local_track: None,
+        local_live: true,
+        latency: Latency::default(),
     });
 
     let engine = Engine {
@@ -414,7 +461,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         player,
         link,
         params: cfg.sync.params(),
-        queue: Vec::new(),
+        queue: Arc::new(Vec::new()),
         revision: 0,
         station: None,
         refilling: false,
@@ -445,6 +492,11 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         position_bias_ms: cfg.sync.position_bias_ms,
         last_seek: None,
         rate_permille: 0,
+        restaged: None,
+        latency: Latency::default(),
+        asked_at: None,
+        load_started: None,
+        barrier_since: None,
         notice: None,
         notice_seen: None,
         notice_since: None,
@@ -558,6 +610,8 @@ enum Origin {
     /// Another player in the room, over the local network.
     Peer,
     Yandex,
+    /// Nowhere: the backend fetches the track itself.
+    Player,
 }
 
 /// A track fetched ahead of time, waiting for the room to reach it.
@@ -850,7 +904,7 @@ struct Engine {
     params: SyncParams,
 
     /// Mirror of the room's queue, as last sent by the relay.
-    queue: Vec<TrackRef>,
+    queue: Arc<Vec<TrackRef>>,
     revision: u64,
 
     /// Set only while *this* peer feeds a station.
@@ -918,6 +972,16 @@ struct Engine {
     /// The speed the player was last set to, as a permille difference from
     /// normal. Only ever non-zero for a backend that [`Playback::supports_rate`].
     rate_permille: i32,
+    /// The track last staged again because the player had left it, when, and
+    /// how many times in a row. See [`Engine::recover_track`].
+    restaged: Option<(String, std::time::Instant, u8)>,
+    latency: Latency,
+    /// When the oldest request the relay has not answered yet went out.
+    asked_at: Option<std::time::Instant>,
+    /// The track being loaded and since when, for [`Latency::load_ms`].
+    load_started: Option<(String, std::time::Instant)>,
+    /// The wait the room is holding a track for, and since when.
+    barrier_since: Option<(u64, std::time::Instant)>,
     notice: Option<String>,
     /// The notice as of the previous publish, so a replacement restarts its life.
     notice_seen: Option<String>,
@@ -990,7 +1054,9 @@ impl Engine {
     fn ask(&mut self, command: ymsync_proto::Command) {
         if !self.link.send_command(command) {
             self.connected = false;
+            return;
         }
+        self.asked_at.get_or_insert_with(std::time::Instant::now);
     }
 
     /// Where the room's playhead is right now, in track time. `None` when the
@@ -1030,8 +1096,28 @@ impl Engine {
             }
 
             Command::PlayWave { seeds } => {
-                let id = StationSpec::from_seeds(seeds, &self.name).encode();
-                self.handle_command(Command::PlayStation { id, replace: true }, internal);
+                let spec = StationSpec::from_seeds(seeds, &self.name);
+                // The wave this peer already feeds, asked for again: the app's
+                // «Моя волна» button pressed while it plays here. Starting over
+                // would throw the session away and replace everyone's queue
+                // mid-track; what is meant is «play it».
+                let same = self
+                    .station
+                    .as_ref()
+                    .is_some_and(|station| StationSpec::parse(&station.id).seeds == spec.seeds);
+                if same {
+                    if self.remote.as_ref().is_some_and(|state| !state.playing && state.waiting.is_none()) {
+                        self.ask(ymsync_proto::Command::Resume);
+                    }
+                    return;
+                }
+                self.handle_command(
+                    Command::PlayStation {
+                        id: spec.encode(),
+                        replace: true,
+                    },
+                    internal,
+                );
             }
 
             Command::WaveFeedback { track_id, kind } => self.wave_feedback(&track_id, kind),
@@ -1297,6 +1383,7 @@ impl Engine {
     /// download lands, so the loop keeps answering commands meanwhile.
     fn start_load(&mut self, track: &TrackRef, internal: &mpsc::UnboundedSender<Internal>) {
         self.loading = Some(track.track_id.clone());
+        self.load_started = Some((track.track_id.clone(), std::time::Instant::now()));
         self.drift_ms = None;
         // A speed picked to close a gap on the last track means nothing for this one.
         self.set_rate(0);
@@ -1447,7 +1534,8 @@ impl Engine {
     ///
     /// Strictly one fetch at a time — see [`Engine::network_free`].
     fn prefetch_next(&mut self, internal: &mpsc::UnboundedSender<Internal>) {
-        if !self.network_free() {
+        // Nothing to fetch for a backend that fetches for itself.
+        if !self.network_free() || (self.player.plays_by_id() && !self.auto_cache) {
             return;
         }
         let Some(next) = self.next_track() else {
@@ -1901,6 +1989,13 @@ impl Engine {
 
                 self.attempts.remove(&track_id);
                 self.deferred.remove(&track_id);
+                if let Some((id, since)) = self.load_started.take()
+                    && id == track_id
+                {
+                    let ms = since.elapsed().as_millis() as i64;
+                    self.latency.load_ms = Some(ms);
+                    debug!(track = %track_id, ms, "track loaded");
+                }
                 self.notice = match origin {
                     // Worth saying: it means this track cost nothing and would
                     // have played with the internet unplugged.
@@ -1932,6 +2027,7 @@ impl Engine {
                 if !accept_seq(self.remote.as_ref().map(|s| s.seq), state.seq) {
                     return;
                 }
+                self.measure_state(&state);
 
                 // A room with no station means someone replaced the queue
                 // outright, which ends the wave — but only once our own claim
@@ -1983,7 +2079,7 @@ impl Engine {
                 // refers to it, over one ordered connection. If a queue ever
                 // gains a second author, this needs the same guard.
                 self.revision = revision;
-                self.queue = tracks;
+                self.queue = Arc::new(tracks);
             }
 
             Event::Peer { joined, peers } => {
@@ -2053,6 +2149,36 @@ impl Engine {
         }
     }
 
+    /// Takes the room's new state's timings: how long the relay took to answer
+    /// this peer's request, how long the frame was on its way, and how long the
+    /// room waited for everyone to be ready.
+    fn measure_state(&mut self, state: &PlaybackState) {
+        if let Some(asked) = self.asked_at.take() {
+            let ms = asked.elapsed().as_millis() as i64;
+            self.latency.command_ms = Some(ms);
+            debug!(ms, "relay answered");
+        }
+        // The anchor is the relay's clock at the moment it made the change —
+        // except when a held track starts, which is anchored a moment ahead.
+        if let Some(now) = self.link.clock().now_server_ms() {
+            let age = now - state.at_server_ms;
+            if (0..60_000).contains(&age) && state.waiting.is_none() {
+                self.latency.delivery_ms = Some(age);
+            }
+        }
+        match (state.waiting, self.barrier_since) {
+            (Some(barrier), Some((held, _))) if barrier == held => {}
+            (Some(barrier), _) => self.barrier_since = Some((barrier, std::time::Instant::now())),
+            (None, Some((_, since))) => {
+                let ms = since.elapsed().as_millis() as i64;
+                self.latency.barrier_ms = Some(ms);
+                debug!(ms, "the room waited for everyone");
+                self.barrier_since = None;
+            }
+            (None, None) => {}
+        }
+    }
+
     /// One pass: keep a station fed, keep the room told what we have, fetch the
     /// next track, download what was asked for, then pull the playhead onto the
     /// room's.
@@ -2064,7 +2190,7 @@ impl Engine {
         // matters more than filling the offline library.
         self.pump_downloads(internal);
         self.report_ready();
-        self.correct();
+        self.correct(internal);
     }
 
     /// Tells the relay this peer can start the track the room is holding.
@@ -2177,7 +2303,7 @@ impl Engine {
     }
 
     /// Pulls the local playhead onto the room's.
-    fn correct(&mut self) {
+    fn correct(&mut self, internal: &mpsc::UnboundedSender<Internal>) {
         // A download is in flight, so the sink still holds the previous track:
         // both the playhead and any drift figure would be meaningless.
         if self.loading.is_some() {
@@ -2194,6 +2320,23 @@ impl Engine {
         // Still fetching, or sitting this track out because this account cannot
         // play it.
         if self.player.current_track_id().as_deref() != Some(track.track_id.as_str()) {
+            self.drift_ms = None;
+            return;
+        }
+        // The player plays something else than it was given. Whatever it is told
+        // now would land on the wrong track — a seek meant for the end of this
+        // one throwing the next to its end — so it is told nothing, and put back
+        // once that is clearly not a moment's lag.
+        if self.player.playing_track_id().as_deref() != Some(track.track_id.as_str()) {
+            self.drift_ms = None;
+            if self.player.lost_track() {
+                self.recover_track(&remote, track, internal);
+            }
+            return;
+        }
+        if !self.player.is_live() {
+            // Nothing the player says can be trusted: neither its position nor
+            // whether it plays. Steering it blind would be guessing.
             self.drift_ms = None;
             return;
         }
@@ -2253,6 +2396,64 @@ impl Engine {
                 self.player.play();
             }
         }
+    }
+
+    /// Puts the room's track back into a player that has left it.
+    ///
+    /// One case is left alone: the player moved on to the room's next track a
+    /// moment before the room did — its copy of the track ended a little early,
+    /// or it is a little ahead — and the room is about to follow. Pulling it back
+    /// for the last second of the old track would be heard as a stutter.
+    ///
+    /// Otherwise the track is staged again, but not on every tick: a player that
+    /// cannot hold a track (it skips one it cannot play) would be fought for ever.
+    fn recover_track(
+        &mut self,
+        remote: &PlaybackState,
+        track: &TrackRef,
+        internal: &mpsc::UnboundedSender<Internal>,
+    ) {
+        let actual = self.player.playing_track_id();
+        let next = self.queue.get(remote.index + 1).map(|t| t.track_id.as_str());
+        if actual.is_some() && actual.as_deref() == next {
+            let ending = remote.playing
+                && track.duration_ms > 0
+                && self
+                    .room_position_ms()
+                    .is_some_and(|position| position + AHEAD_OF_ROOM_MS >= track.duration_ms as i64);
+            if ending {
+                return;
+            }
+        }
+
+        let now = std::time::Instant::now();
+        let tries = match &self.restaged {
+            Some((id, at, tries)) if *id == track.track_id => {
+                let gap = if *tries < RESTAGE_QUICK_TRIES {
+                    RESTAGE_GAP
+                } else {
+                    RESTAGE_SLOW_GAP
+                };
+                if now.duration_since(*at) < gap {
+                    return;
+                }
+                *tries
+            }
+            _ => 0,
+        };
+        warn!(
+            track = %track.track_id,
+            on = ?actual,
+            tries,
+            "the player left the room's track; staging it again"
+        );
+        self.restaged = Some((track.track_id.clone(), now, tries.saturating_add(1)));
+        self.notice = Some(if tries < RESTAGE_QUICK_TRIES {
+            format!("плеер ушёл с трека комнаты — возвращаю {track}")
+        } else {
+            format!("плеер не держит {track} — пробую снова")
+        });
+        self.start_load(track, internal);
     }
 
     /// Sets the player's speed, if it is not already at it. Speed differences
@@ -2316,7 +2517,7 @@ impl Engine {
         let _ = self.snapshots.send(Snapshot {
             connected: self.connected,
             peers: self.peers,
-            queue: self.queue.clone(),
+            queue: Arc::clone(&self.queue),
             queue_revision: self.revision,
             index: self.remote.as_ref().map_or(0, |state| state.index),
             track,
@@ -2365,6 +2566,14 @@ impl Engine {
             shuffle: self.remote.as_ref().is_some_and(|state| state.shuffle),
             waiting: self.remote.as_ref().is_some_and(|state| state.waiting.is_some()),
             notice: self.notice.clone(),
+            room_playing: self.remote.as_ref().map(|state| state.playing),
+            local_track: self.player.playing_track_id(),
+            local_live: self.player.is_live(),
+            latency: Latency {
+                rtt_ms: self.link.clock().rtt_ms(),
+                rtt_last_ms: self.link.clock().last_rtt_ms(),
+                ..self.latency.clone()
+            },
         });
     }
 
@@ -2439,6 +2648,18 @@ const START_BYTES: usize = 128 * 1024;
 /// no lookup either: a peer's file server carries audio, not metadata.
 async fn fetch_source(fetch: &Fetch, want: &TrackRef) -> Result<Fetched, LoadFailure> {
     let id = want.track_id.as_str();
+
+    // The backend fetches the track itself; all it needs is the name. Whether
+    // this account may play it is the backend's answer to the load.
+    if fetch.player.plays_by_id() && !fetch.store {
+        return Ok(Fetched {
+            track: want.clone(),
+            source: AudioSource::Named,
+            origin: Origin::Player,
+            stored: false,
+            stream: None,
+        });
+    }
 
     if let Some(cached) = fetch.cache.track(id) {
         return match from_cache(fetch, id).await {
@@ -2754,7 +2975,7 @@ async fn stage_track(
     source: AudioSource,
 ) -> Result<()> {
     match source {
-        AudioSource::Url(_) => player.load(track, source),
+        AudioSource::Url(_) | AudioSource::Named => player.load(track, source),
         AudioSource::Bytes(_) | AudioSource::Stream(_) => {
             let player = Arc::clone(player);
             // Decoding probes the container — and, for a track still arriving,

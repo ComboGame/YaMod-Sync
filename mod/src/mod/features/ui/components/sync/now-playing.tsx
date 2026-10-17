@@ -15,12 +15,23 @@ export function coverUrl(uri: string | undefined, size: number) {
   return uri ? `https://${uri.replace("%%", `${size}x${size}`)}` : undefined;
 }
 
-/** Насколько вы совпадаете с комнатой — ради этого комната и существует. */
+/**
+ * Насколько вы совпадаете с комнатой — ради этого комната и существует.
+ *
+ * Состояние комнаты и вашего плеера — разные вещи, и неизвестное не выдаётся за
+ * паузу: «пауза у всех» — только когда комната действительно стоит.
+ */
 export function syncState(room: RoomSnapshot): { tone: "together" | "catching" | "idle"; text: string } {
   const drift = room.drift_ms;
-  if (room.waiting) return { tone: "idle", text: "Ждём, пока трек загрузится у всех" };
   if (!room.track) return { tone: "idle", text: "В комнате тихо" };
-  if (!room.playing) return { tone: "idle", text: "Пауза у всех" };
+  if (room.waiting) return { tone: "idle", text: "Ждём, пока трек загрузится у всех" };
+  if (room.room_playing === null) return { tone: "catching", text: "Узнаю, что играет в комнате" };
+  if (!room.room_playing) return { tone: "idle", text: "Пауза у всех" };
+  if (room.loading) return { tone: "catching", text: "Загружаю трек" };
+  if (!room.local_live) return { tone: "catching", text: "Плеер не отвечает" };
+  if (room.local_track && room.local_track !== room.track.track_id) {
+    return { tone: "catching", text: "Плеер на другом треке — возвращаю" };
+  }
   if (drift === null) return { tone: "catching", text: "Выравниваю позицию" };
   if (Math.abs(drift) <= 120) return { tone: "together", text: `В синхроне, ${Math.abs(drift)} мс` };
   return { tone: "catching", text: `Догоняю комнату, ${Math.abs(drift)} мс` };
@@ -116,11 +127,11 @@ export function NowPlaying({ room }: { room: RoomSnapshot }) {
           </Button>
           <Button
             size="icon-lg"
-            aria-label={room.playing ? "Пауза для всех" : "Играть для всех"}
+            aria-label={room.room_playing || room.waiting ? "Пауза для всех" : "Играть для всех"}
             onClick={() => command({ c: "toggle" })}
             disabled={!track}
           >
-            {room.playing ? <Pause className="size-5" fill="currentColor" /> : <Play className="size-5 translate-x-px" fill="currentColor" />}
+            {room.room_playing || room.waiting ? <Pause className="size-5" fill="currentColor" /> : <Play className="size-5 translate-x-px" fill="currentColor" />}
           </Button>
           <Button variant="secondary" size="icon" aria-label="Следующий трек" onClick={() => command({ c: "next" })}>
             <SkipForward className="size-[18px]" fill="currentColor" />

@@ -198,23 +198,41 @@ export function trackFromMeta(meta: any): TrackRef | null {
   };
 }
 
+function entityIds(state: any): string[] {
+  const list: any[] = state.queueState.entityList.value ?? [];
+  return list.map((item) => String(item?.entity?.data?.meta?.id ?? ""));
+}
+
+function unloaded(ids: string[]) {
+  return ids.map((id) => ({ type: "unloaded", meta: { id } }));
+}
+
+/** Очередь плеера идёт по порядку списка: перемешивание плеера мы не включаем, но проверяем. */
+function inListOrder(state: any): boolean {
+  const order: number[] | undefined = state.queueState.order?.value;
+  return !order || order.every((at, i) => at === i);
+}
+
 /**
  * Ставит очередь комнаты в плеер на треке `index`.
  *
- * Если очередь та же (тот же id контекста и те же треки), плеер только
- * переключает трек — без перезагрузки контекста. Играл ли он до этого или
- * стоял, так и остаётся: ядро само скажет, что делать, когда комната стартует.
+ * Если в плеере уже наша очередь с теми же треками, плеер только переключает
+ * трек — без перезагрузки контекста. Играл ли он до этого или стоял, так и
+ * остаётся: ядро само скажет, что делать, когда комната стартует.
  */
 export async function stageQueue(contextId: string, ids: string[], index: number): Promise<void> {
   const p = player();
   if (!p) throw new Error("плеер Яндекс Музыки ещё не готов");
   const state = p.getState();
-  const current = state.currentContext?.value?.data?.meta?.id;
-  const list: any[] = state.queueState.entityList.value ?? [];
+  const current = String(state.currentContext?.value?.data?.meta?.id ?? "");
+  const list = entityIds(state);
+  // id контекста не сравнивается: очередь обновляется на месте (updateQueue), и
+  // контекст с прежней ревизией несёт уже новую очередь.
   const sameList =
-    String(current) === contextId &&
+    current.startsWith(OUR_CONTEXT_PREFIX) &&
+    inListOrder(state) &&
     list.length === ids.length &&
-    list.every((item, i) => String(item?.entity?.data?.meta?.id) === ids[i]);
+    list.every((id, i) => id === ids[i]);
 
   if (sameList) {
     if ((state.queueState.index.value ?? -1) !== index) await asMod(() => p.setEntityByIndex(index));
@@ -223,12 +241,54 @@ export async function stageQueue(contextId: string, ids: string[], index: number
     await asMod(() =>
       p.setContext({
         contextData: { type: "various", meta: { id: contextId }, from: "ymsync" },
-        entitiesData: ids.map((id) => ({ type: "unloaded", meta: { id } })),
+        entitiesData: unloaded(ids),
         queueParams: { index },
         loadContextMeta: false,
       }),
     );
   }
+}
+
+/**
+ * Приводит то, что плеер сыграет дальше, к очереди комнаты — не трогая трек,
+ * который играет сейчас.
+ *
+ * Волна дописывает в очередь комнаты новые треки каждые несколько песен.
+ * Раньше плеер узнавал о них только на следующей смене трека, через
+ * pause + setContext — это был обрыв на каждой подгрузке волны, а в конце
+ * старого списка плеер и вовсе останавливался. Теперь хвост очереди меняется
+ * на месте (inject/remove очереди Sonata), и плеер сам переходит на следующий
+ * трек комнаты.
+ *
+ * Возвращает false, если плеер сейчас не на треке комнаты: тогда очередь
+ * поставит загрузка трека.
+ */
+export function updateQueue(ids: string[], roomIndex: number): boolean {
+  const p = player();
+  if (!p || typeof p.inject !== "function" || typeof p.remove !== "function") return false;
+  const state = p.getState();
+  const context = String(state.currentContext?.value?.data?.meta?.id ?? "");
+  if (!context.startsWith(OUR_CONTEXT_PREFIX) || !inListOrder(state)) return false;
+  const list = entityIds(state);
+  const at: number = state.queueState.index.value ?? -1;
+  if (at < 0 || list[at] === undefined || list[at] !== ids[roomIndex]) return false;
+
+  const ahead = list.slice(at + 1);
+  const wanted = ids.slice(roomIndex + 1);
+  if (ahead.length === wanted.length && ahead.every((id, i) => id === wanted[i])) return true;
+
+  asMod(() => {
+    if (ahead.every((id, i) => id === wanted[i])) {
+      // Обычный случай — подгрузка волны: в конец добавились треки.
+      p.inject({ entitiesData: unloaded(wanted.slice(ahead.length)), position: list.length });
+      return;
+    }
+    if (ahead.length) {
+      p.remove(ahead.map((_, i) => at + 1 + i));
+    }
+    if (wanted.length) p.inject({ entitiesData: unloaded(wanted), position: at + 1 });
+  });
+  return true;
 }
 
 /**
@@ -241,9 +301,14 @@ export async function stageQueue(contextId: string, ids: string[], index: number
  * нового. Признак, что подмена прошла: длительность совпала с длительностью
  * трека из очереди комнаты (или звук ещё не загружался вовсе).
  */
-export async function waitUntilOn(trackId: string, durationMs: number, timeoutMs = 5000): Promise<boolean> {
+export async function waitUntilOn(
+  trackId: string,
+  durationMs: number,
+  timeoutMs = 5000,
+  cancelled: () => boolean = () => false,
+): Promise<boolean> {
   const started = performance.now();
-  while (performance.now() - started < timeoutMs) {
+  while (performance.now() - started < timeoutMs && !cancelled()) {
     const now = snapshot();
     // 0 — звук ещё не грузился (после setContext плеер ждёт play): старого трека,
     // которому могли бы достаться указания, тоже нет.

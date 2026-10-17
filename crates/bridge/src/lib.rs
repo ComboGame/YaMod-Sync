@@ -264,7 +264,9 @@ async fn supervise(
                     // hear where it is rather than wait for a change that will not come.
                     status(SessionState::Connected, None);
                     last_sent = tokio::time::Instant::now();
-                    send_snapshot(&out, &snapshots.borrow().clone());
+                    let snapshot = snapshots.borrow().clone();
+                    send_queue(&out, &snapshot);
+                    send_snapshot(&out, &snapshot);
                     // Its player starts out empty: give it the track again. After the
                     // snapshot, so the window already knows the queue it belongs to.
                     player.restage();
@@ -279,6 +281,9 @@ async fn supervise(
                     }
                     let snapshot = snapshots.borrow_and_update().clone();
                     let queue_moved = last_revision != Some(snapshot.queue_revision);
+                    if queue_moved {
+                        send_queue(&out, &snapshot);
+                    }
                     if queue_moved || last_sent.elapsed() >= SNAPSHOT_EVERY {
                         last_revision = Some(snapshot.queue_revision);
                         last_sent = tokio::time::Instant::now();
@@ -324,15 +329,25 @@ fn send_snapshot(out: &mpsc::UnboundedSender<Output>, snapshot: &Snapshot) {
     if let Some(map) = value.as_object_mut() {
         map.remove("cached");
         map.remove("on_lan");
+        // Sent on its own when it changes; see [`Output::Queue`].
+        map.remove("queue");
     }
     let _ = out.send(Output::Snapshot { snapshot: value });
 }
 
+fn send_queue(out: &mpsc::UnboundedSender<Output>, snapshot: &Snapshot) {
+    let _ = out.send(Output::Queue {
+        revision: snapshot.queue_revision,
+        tracks: snapshot.queue.as_ref().clone(),
+    });
+}
+
 async fn start_session(start: &StartConfig, player: Arc<RemotePlayback>) -> Result<session::Session> {
     let cfg = core_config(start);
-    let api = match cfg.yandex_token.as_str() {
-        "" => None,
-        token => Some(Arc::new(YandexMusic::new(token)?)),
+    let api = match (cfg.yandex_token.as_str(), start.api_base.trim()) {
+        ("", _) => None,
+        (token, "") => Some(Arc::new(YandexMusic::new(token)?)),
+        (token, base) => Some(Arc::new(YandexMusic::with_base(token, base)?)),
     };
     let cache = session::open_cache(&cfg)?;
     let likes = session::open_likes(&cache);

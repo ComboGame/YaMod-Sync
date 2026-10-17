@@ -39,9 +39,24 @@ pub struct Clock {
     offset_ms: AtomicI64,
     rtt_ms: AtomicI64,
     valid: AtomicBool,
+    /// The latest probe's round trip; -1 until one lands.
+    last_rtt_ms: AtomicI64,
 }
 
 impl Clock {
+    fn note_probe(&self, rtt_ms: i64) {
+        self.last_rtt_ms.store(rtt_ms.max(0) + 1, Ordering::Relaxed);
+    }
+
+    /// The latest probe's round trip. Unlike [`Clock::rtt_ms`], which is the
+    /// best of a window, this one moves with the moment.
+    pub fn last_rtt_ms(&self) -> Option<i64> {
+        match self.last_rtt_ms.load(Ordering::Relaxed) {
+            0 => None,
+            stored => Some(stored - 1),
+        }
+    }
+
     fn publish(&self, offset_ms: i64, rtt_ms: i64) {
         self.offset_ms.store(offset_ms, Ordering::Relaxed);
         self.rtt_ms.store(rtt_ms, Ordering::Relaxed);
@@ -176,6 +191,9 @@ impl Link {
 
         let clock = Arc::new(Clock::default());
         clock.publish_from(&sampler);
+        if let Some(rtt) = sampler.rtt_ms() {
+            clock.note_probe(rtt);
+        }
         if clock.offset_ms().is_none() {
             bail!("не удалось оценить смещение часов относительно релея");
         }
@@ -329,7 +347,10 @@ async fn read_loop(
         match serde_json::from_str::<ServerMsg>(text.as_str()) {
             // Clock replies never reach the sync loop: they are the clock.
             Ok(ServerMsg::TimeRes { c0, s }) => {
-                sampler.push(sample_from_roundtrip(c0, s, unix_ms()));
+                let sample = sample_from_roundtrip(c0, s, unix_ms());
+                debug!(rtt_ms = sample.rtt_ms, offset_ms = sample.offset_ms, "clock probe");
+                clock.note_probe(sample.rtt_ms);
+                sampler.push(sample);
                 clock.publish_from(&sampler);
             }
             Ok(msg) => {

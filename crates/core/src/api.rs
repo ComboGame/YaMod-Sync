@@ -38,6 +38,8 @@ const ERROR_EXCERPT: usize = 400;
 pub struct YandexMusic {
     http: reqwest::Client,
     token: String,
+    /// Where the API is. Yandex's own, except in tests, which answer for it.
+    base: String,
     /// This account's numeric id, asked for once. Every «Мне нравится» call needs
     /// it, and it cannot change under a fixed token.
     uid: tokio::sync::OnceCell<i64>,
@@ -50,6 +52,12 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
 
 impl YandexMusic {
     pub fn new(token: impl Into<String>) -> Result<Self> {
+        Self::with_base(token, API_BASE)
+    }
+
+    /// A client for an API somewhere else than Yandex's: a test standing in for
+    /// it, to see what the wave asks for and when.
+    pub fn with_base(token: impl Into<String>, base: impl Into<String>) -> Result<Self> {
         let http = client_builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(30))
@@ -58,8 +66,13 @@ impl YandexMusic {
         Ok(Self {
             http,
             token: token.into(),
+            base: base.into().trim_end_matches('/').to_string(),
             uid: tokio::sync::OnceCell::new(),
         })
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
     }
 
     pub async fn account_status(&self) -> Result<AccountStatus> {
@@ -478,7 +491,7 @@ impl YandexMusic {
     ) -> Result<()> {
         let body = feedback_body(batch_id, event, &utc_now_iso());
         let path = format!("/rotor/session/{session}/feedback");
-        let url = format!("{API_BASE}{path}");
+        let url = self.url(&path);
         self.send(self.authorized(self.http.post(&url)).json(&body), &url)
             .await
             .with_context(|| format!("отзыв волне ({})", event.kind()))?;
@@ -578,7 +591,7 @@ impl YandexMusic {
     }
 
     async fn get_result<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
-        let url = format!("{API_BASE}{path}");
+        let url = self.url(&path);
         let body = self.get_body(&url, query).await?;
 
         // Search responses repeat keys — every track object carries `albums`
@@ -625,7 +638,7 @@ impl YandexMusic {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<T> {
-        let url = format!("{API_BASE}{path}");
+        let url = self.url(&path);
         let text = self
             .send(self.authorized(self.http.post(&url)).json(body), &url)
             .await?;
@@ -644,7 +657,7 @@ impl YandexMusic {
     /// A form POST. The two «Мне нравится» endpoints are the only writes this
     /// client makes, and they answer with a revision number nothing here needs.
     async fn post_form(&self, path: &str, form: &[(&str, &str)]) -> Result<String> {
-        let url = format!("{API_BASE}{path}");
+        let url = self.url(&path);
         self.send(self.authorized(self.http.post(&url)).form(form), &url)
             .await
     }

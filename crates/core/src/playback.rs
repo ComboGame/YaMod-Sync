@@ -19,6 +19,9 @@ pub enum AudioSource {
     Stream(crate::stream::Progressive),
     /// A signed URL for a backend that streams on its own.
     Url(String),
+    /// Nothing but the track: the backend fetches it itself. See
+    /// [`Playback::plays_by_id`].
+    Named,
 }
 
 /// Everything the sync engine needs from a player.
@@ -64,4 +67,32 @@ pub trait Playback: Send + Sync + 'static {
     /// Plays at `rate` of normal speed, pitch kept. Only called when
     /// [`Playback::supports_rate`] says so.
     fn set_rate(&self, _rate: f32) {}
+
+    /// Whether this backend fetches the audio itself and only needs to be told
+    /// which track. The engine then resolves nothing before [`Playback::load`]:
+    /// asking Yandex for a stream URL nobody opens only made every track change
+    /// wait for two round trips, and spent requests the backend makes anyway.
+    fn plays_by_id(&self) -> bool {
+        false
+    }
+
+    /// The track the backend is actually on, as far as it knows, which may not
+    /// be the staged one: a player in another process can move on by itself.
+    fn playing_track_id(&self) -> Option<String> {
+        self.current_track_id()
+    }
+
+    /// The backend has left the staged track by itself and is playing something
+    /// of the room's queue it was not told to — the track has to be staged
+    /// again. Never true for a backend that plays only what it is handed.
+    fn lost_track(&self) -> bool {
+        false
+    }
+
+    /// Whether the backend's word about its playhead is current. A player in
+    /// another process that has stopped reporting — a frozen or reloading
+    /// window — is not known to be playing *or* paused.
+    fn is_live(&self) -> bool {
+        true
+    }
 }

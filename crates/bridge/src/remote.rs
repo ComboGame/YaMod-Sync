@@ -6,6 +6,12 @@
 //! second. Between reports the position is extrapolated, the same way the room's
 //! own anchor is: a playing player moves on by itself.
 //!
+//! Three things are kept apart here, because mixing them up was the bug where
+//! the panel showed one track while another played: the track the engine
+//! *staged*, whether the app *confirmed* it, and what the app *reports* it is on
+//! now. The app's player can move to another track by itself, and until it is
+//! put back nothing the engine says may be applied to it.
+//!
 //! [`Playback::load`] is the one call that waits. The engine treats a track as
 //! staged — and tells the room it is ready to start — once `load` returns, and
 //! with a streaming player in another process that is only true once that player
@@ -27,8 +33,13 @@ pub const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A report older than this says nothing reliable about a playing player: the
 /// window may be frozen, or the renderer reloading. Position is then held, not
-/// extrapolated into the future.
+/// extrapolated into the future, and the engine stops steering.
 const STALE_REPORT: Duration = Duration::from_secs(2);
+
+/// How long the app has to report another track of the room's queue before
+/// the staged one counts as lost. Long enough for a report that was already on
+/// its way when the track changed, short enough to be put right within a beat.
+const LOST_AFTER: Duration = Duration::from_millis(600);
 
 #[derive(Debug, Default)]
 struct State {
@@ -38,6 +49,14 @@ struct State {
     load: Option<(String, Result<(), String>)>,
     /// Which track the app says its player is on.
     reported_track: Option<String>,
+    /// Whether that track is on the room's queue rather than one the listener
+    /// just started.
+    reported_ours: bool,
+    /// When the app last said anything about its player.
+    reported_at: Option<Instant>,
+    /// Since when the app has said it is on another track of the room's queue
+    /// than the staged one, after it confirmed the staged one.
+    off_since: Option<Instant>,
     position_ms: f64,
     playing: bool,
     ended: bool,
@@ -79,6 +98,7 @@ impl RemotePlayback {
         let mut state = self.state.lock().expect("player state");
         state.staged = None;
         state.load = None;
+        state.off_since = None;
         if state.rate != 1.0 {
             state.rate = 1.0;
             drop(state);
@@ -98,12 +118,20 @@ impl RemotePlayback {
 
     /// Where the app's player is, as it just said.
     pub fn report(&self, report: PlayerReport) {
+        let now = Instant::now();
         let mut state = self.state.lock().expect("player state");
+        let off = match (&state.staged, &report.track_id) {
+            (Some(staged), Some(reported)) => report.ours && *reported != staged.track_id,
+            _ => false,
+        };
+        state.off_since = if off { state.off_since.or(Some(now)) } else { None };
         state.reported_track = report.track_id;
+        state.reported_ours = report.ours;
+        state.reported_at = Some(now);
         state.position_ms = report.position_ms.max(0.0);
         state.playing = report.playing;
         state.ended = report.ended;
-        state.at = Some(Instant::now());
+        state.at = Some(now);
     }
 
     /// The app's answer to a [`PlayerOp::Load`].
@@ -115,6 +143,11 @@ impl RemotePlayback {
             return;
         }
         let result = if report.ok {
+            // The app is on it now, whatever its last report said: that report
+            // was sent before the track changed.
+            state.reported_track = Some(report.track_id.clone());
+            state.reported_ours = true;
+            state.off_since = None;
             Ok(())
         } else {
             Err(report
@@ -130,6 +163,16 @@ impl RemotePlayback {
             (Some(staged), Some(reported)) => &staged.track_id == reported,
             _ => false,
         }
+    }
+
+    fn fresh(state: &State) -> bool {
+        state.reported_at.is_some_and(|at| at.elapsed() < STALE_REPORT)
+    }
+
+    /// The staged track's id, for the instructions that act on it.
+    fn staged_id(&self) -> Option<String> {
+        let state = self.state.lock().expect("player state");
+        state.staged.as_ref().map(|t| t.track_id.clone())
     }
 
     fn current_position(state: &State) -> f64 {
@@ -154,18 +197,22 @@ impl Playback for RemotePlayback {
         false
     }
 
+    fn plays_by_id(&self) -> bool {
+        true
+    }
+
     fn load(&self, track: TrackRef, _source: AudioSource) -> Result<()> {
         let id = track.track_id.clone();
         {
             let mut state = self.state.lock().expect("player state");
             state.staged = Some(track.clone());
             state.load = None;
+            state.off_since = None;
             state.playing = false;
             state.position_ms = 0.0;
             state.at = Some(Instant::now());
         }
-        // The app plays by track id from its own account; the source the engine
-        // resolved is not needed beyond having proved the track is available.
+        // The app plays by track id from its own account.
         self.send(PlayerOp::Load { track });
 
         let wait = || {
@@ -217,7 +264,8 @@ impl Playback for RemotePlayback {
             state.playing = true;
             state.at = Some(Instant::now());
         }
-        self.send(PlayerOp::Play);
+        let track_id = self.staged_id();
+        self.send(PlayerOp::Play { track_id });
     }
 
     fn pause(&self) {
@@ -231,7 +279,8 @@ impl Playback for RemotePlayback {
             state.playing = false;
             state.at = Some(Instant::now());
         }
-        self.send(PlayerOp::Pause);
+        let track_id = self.staged_id();
+        self.send(PlayerOp::Pause { track_id });
     }
 
     fn seek_ms(&self, ms: u64) -> Result<()> {
@@ -240,7 +289,8 @@ impl Playback for RemotePlayback {
             state.position_ms = ms as f64;
             state.at = Some(Instant::now());
         }
-        self.send(PlayerOp::Seek { ms });
+        let track_id = self.staged_id();
+        self.send(PlayerOp::Seek { ms, track_id });
         Ok(())
     }
 
@@ -265,6 +315,31 @@ impl Playback for RemotePlayback {
     fn current_track_id(&self) -> Option<String> {
         let state = self.state.lock().expect("player state");
         state.staged.as_ref().map(|t| t.track_id.clone())
+    }
+
+    fn playing_track_id(&self) -> Option<String> {
+        let state = self.state.lock().expect("player state");
+        if Self::fresh(&state) {
+            state.reported_track.clone()
+        } else {
+            state.staged.as_ref().map(|t| t.track_id.clone())
+        }
+    }
+
+    fn lost_track(&self) -> bool {
+        let state = self.state.lock().expect("player state");
+        let Some(staged) = state.staged.as_ref() else {
+            return false;
+        };
+        // Until the app has confirmed the track it is still on its way there.
+        let confirmed = matches!(&state.load, Some((id, Ok(()))) if *id == staged.track_id);
+        confirmed
+            && Self::fresh(&state)
+            && state.off_since.is_some_and(|since| since.elapsed() >= LOST_AFTER)
+    }
+
+    fn is_live(&self) -> bool {
+        Self::fresh(&self.state.lock().expect("player state"))
     }
 
     fn supports_rate(&self) -> bool {
@@ -397,6 +472,7 @@ mod tests {
             position_ms: 10_000.0,
             playing: true,
             ended: false,
+            ours: true,
         });
         std::thread::sleep(Duration::from_millis(60));
         let position = player.position_ms();
@@ -408,6 +484,7 @@ mod tests {
             position_ms: 20_000.0,
             playing: false,
             ended: false,
+            ours: true,
         });
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(player.position_ms(), 20_000, "a paused player stays put");
@@ -425,6 +502,7 @@ mod tests {
             position_ms: 90_000.0,
             playing: true,
             ended: true,
+            ours: true,
         });
         assert_eq!(player.position_ms(), 0);
         assert!(!player.is_playing());
@@ -453,6 +531,7 @@ mod tests {
             position_ms: 10_000.0,
             playing: true,
             ended: false,
+            ours: true,
         });
         player.set_rate(0.5);
         assert!(matches!(ops.try_recv(), Ok(PlayerOp::Rate { rate }) if rate == 0.5));
@@ -478,6 +557,104 @@ mod tests {
         // Pausing an already paused player says nothing.
         player.pause();
         let sent: Vec<PlayerOp> = std::iter::from_fn(|| ops.try_recv().ok()).collect();
-        assert!(matches!(sent[..], [PlayerOp::Seek { ms: 42_000 }, PlayerOp::Play, PlayerOp::Pause]));
+        assert!(matches!(
+            &sent[..],
+            [PlayerOp::Seek { ms: 42_000, track_id: Some(a) }, PlayerOp::Play { track_id: Some(b) }, PlayerOp::Pause { .. }]
+                if a == "1" && b == "1"
+        ));
+    }
+
+    fn report(track_id: &str, position_ms: f64, ours: bool) -> PlayerReport {
+        PlayerReport {
+            track_id: Some(track_id.to_string()),
+            position_ms,
+            playing: true,
+            ended: false,
+            ours,
+        }
+    }
+
+    /// Stages a track and has the app confirm it, as a finished load leaves it.
+    fn confirmed(player: &RemotePlayback, id: &str) {
+        player.state.lock().unwrap().staged = Some(track(id));
+        player.loaded(LoadReport {
+            track_id: id.to_string(),
+            ok: true,
+            error: None,
+        });
+    }
+
+    /// The app moving to another track of the room's queue by itself is the
+    /// moment everything the engine says starts landing on the wrong track. It
+    /// has to be noticed — after a moment, since a report already on its way
+    /// may still name the old one.
+    #[test]
+    fn a_player_that_moves_on_by_itself_has_lost_the_staged_track() {
+        let (player, _ops) = player(Duration::from_secs(1));
+        confirmed(&player, "1");
+        player.report(report("1", 5_000.0, true));
+        assert!(!player.lost_track());
+
+        player.report(report("2", 100.0, true));
+        assert!(!player.lost_track(), "one report is not yet a verdict");
+        assert_eq!(player.playing_track_id().as_deref(), Some("2"));
+        assert_eq!(player.current_track_id().as_deref(), Some("1"), "staged is still what the engine asked for");
+        assert!(!player.is_playing(), "it does not play the staged track");
+
+        std::thread::sleep(LOST_AFTER + Duration::from_millis(50));
+        player.report(report("2", 800.0, true));
+        assert!(player.lost_track());
+
+        // Back on it: found again.
+        player.report(report("1", 5_900.0, true));
+        assert!(!player.lost_track());
+    }
+
+    /// Something the listener started in the app is about to become the room's
+    /// queue; pulling the player back to the room's track would undo it.
+    #[test]
+    fn a_track_the_listener_started_is_not_a_lost_track() {
+        let (player, _ops) = player(Duration::from_secs(1));
+        confirmed(&player, "1");
+        player.report(report("99", 0.0, false));
+        std::thread::sleep(LOST_AFTER + Duration::from_millis(50));
+        player.report(report("99", 700.0, false));
+        assert!(!player.lost_track());
+    }
+
+    /// While the app is still on its way to a track, the old one in its reports
+    /// is expected, not a sign of anything.
+    #[test]
+    fn before_the_app_confirms_a_load_the_old_track_does_not_count_as_lost() {
+        let (player, _ops) = player(Duration::from_secs(1));
+        player.state.lock().unwrap().staged = Some(track("2"));
+        player.report(report("1", 179_000.0, true));
+        std::thread::sleep(LOST_AFTER + Duration::from_millis(50));
+        player.report(report("1", 179_600.0, true));
+        assert!(!player.lost_track());
+
+        // The confirmation outranks the report sent before it.
+        player.loaded(LoadReport {
+            track_id: "2".to_string(),
+            ok: true,
+            error: None,
+        });
+        assert!(!player.lost_track());
+        assert_eq!(player.playing_track_id().as_deref(), Some("2"));
+    }
+
+    /// A window that stopped reporting is neither playing nor paused as far as
+    /// anybody knows, and the engine must not steer it on a guess.
+    #[test]
+    fn an_app_that_stops_reporting_is_not_live() {
+        let (player, _ops) = player(Duration::from_secs(1));
+        assert!(!player.is_live(), "nothing heard yet");
+        confirmed(&player, "1");
+        player.report(report("1", 1_000.0, true));
+        assert!(player.is_live());
+        std::thread::sleep(STALE_REPORT + Duration::from_millis(100));
+        assert!(!player.is_live());
+        assert!(!player.lost_track(), "a silent player has not lost anything it is known to");
+        assert_eq!(player.playing_track_id().as_deref(), Some("1"));
     }
 }
