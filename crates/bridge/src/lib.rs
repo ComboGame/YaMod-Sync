@@ -1,9 +1,9 @@
 //! The YandexMusicSync core, run for a player in another process.
 //!
 //! The patched Yandex Music app starts this as a child and talks to it over
-//! stdin and stdout (see [`protocol`]). Everything that makes a room work вЂ” the
-//! relay link, the shared clock, the queue, В«РњРѕСЏ РІРѕР»РЅР°В» and its feedback to
-//! Yandex вЂ” is the core's engine; the [`Playback`] it drives is a
+//! stdin and stdout (see [`protocol`]). Everything that makes a room work — the
+//! relay link, the shared clock, the queue, «Моя волна» and its feedback to
+//! Yandex — is the core's engine; the [`Playback`] it drives is a
 //! [`remote::RemotePlayback`] that steers the app's own player.
 //!
 //! [`Playback`]: ymsync::playback::Playback
@@ -79,7 +79,7 @@ where
         let message: Input = match serde_json::from_str(&line) {
             Ok(message) => message,
             Err(err) => {
-                warn!("РЅРµРїРѕРЅСЏС‚РЅР°СЏ СЃС‚СЂРѕРєР° РѕС‚ РјРѕРґР°: {err}");
+                warn!("непонятная строка от мода: {err}");
                 continue;
             }
         };
@@ -226,7 +226,7 @@ async fn supervise(
             Ok(session) => session,
             Err(err) => {
                 let message = format!("{err:#}");
-                warn!("РЅРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРєР»СЋС‡РёС‚СЊСЃСЏ: {message}");
+                warn!("не удалось подключиться: {message}");
                 status(SessionState::Reconnecting, Some(message));
                 let wait = BACKOFF[attempt.min(BACKOFF.len() - 1)];
                 attempt += 1;
@@ -242,7 +242,7 @@ async fn supervise(
         };
         attempt = 0;
         status(SessionState::Connected, None);
-        info!(room = %start.room, "РІ РєРѕРјРЅР°С‚Рµ");
+        info!(room = %start.room, "в комнате");
 
         let mut snapshots = session.handle().subscribe();
         let mut last_sent = tokio::time::Instant::now() - SNAPSHOT_EVERY;
@@ -300,15 +300,15 @@ async fn supervise(
 
         let outcome = session.shutdown().await;
         if asked {
-            debug!("СЃРµСЃСЃРёСЏ Р·Р°РєСЂС‹С‚Р° РїРѕ Р·Р°РїСЂРѕСЃСѓ");
+            debug!("сессия закрыта по запросу");
             status(SessionState::Stopped, None);
             continue;
         }
         let message = match outcome {
-            Ok(()) => "СЃРѕРµРґРёРЅРµРЅРёРµ СЃ РєРѕРјРЅР°С‚РѕР№ Р·Р°РєСЂС‹Р»РѕСЃСЊ".to_string(),
+            Ok(()) => "соединение с комнатой закрылось".to_string(),
             Err(err) => format!("{err:#}"),
         };
-        warn!("СЃРµСЃСЃРёСЏ РѕР±РѕСЂРІР°Р»Р°СЃСЊ: {message}");
+        warn!("сессия оборвалась: {message}");
         status(SessionState::Reconnecting, Some(message));
         tokio::select! {
             _ = tokio::time::sleep(BACKOFF[0]) => {}
