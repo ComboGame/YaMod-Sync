@@ -41,7 +41,8 @@ impl Default for SyncParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NudgeParams {
     /// Inside this, play at normal speed. Keeps the speed from twitching on the
-    /// estimate's own jitter.
+    /// estimate's own jitter: the app's playhead reads ±20–50 ms around the
+    /// truth, and a deadband smaller than that changed the speed every tick.
     pub deadband_ms: i64,
     /// How much drift asks for one permille of speed difference.
     pub ms_per_permille: i64,
@@ -55,7 +56,7 @@ pub struct NudgeParams {
 impl Default for NudgeParams {
     fn default() -> Self {
         Self {
-            deadband_ms: 15,
+            deadband_ms: 40,
             ms_per_permille: 4,
             max_permille: 50,
             seek_beyond_ms: 1_500,
@@ -320,6 +321,7 @@ mod tests {
         assert_eq!(n.permille(-1_400), 50);
         assert_eq!(n.permille(80), -20);
         assert_eq!(n.permille(-15), 0);
+        assert_eq!(n.permille(35), 0, "the playhead's own jitter changes nothing");
     }
 
     #[test]

@@ -2157,13 +2157,16 @@ impl Engine {
             let ms = asked.elapsed().as_millis() as i64;
             self.latency.command_ms = Some(ms);
             debug!(ms, "relay answered");
-        }
-        // The anchor is the relay's clock at the moment it made the change —
-        // except when a held track starts, which is anchored a moment ahead.
-        if let Some(now) = self.link.clock().now_server_ms() {
-            let age = now - state.at_server_ms;
-            if (0..60_000).contains(&age) && state.waiting.is_none() {
-                self.latency.delivery_ms = Some(age);
+            // The answer to a request is anchored at the relay's clock the
+            // moment it applied it, so its age is how long it travelled. Other
+            // states are not: a room replayed on joining carries an anchor from
+            // whenever it last changed, and a track that started after a wait is
+            // anchored a moment ahead.
+            if let Some(now) = self.link.clock().now_server_ms() {
+                let age = now - state.at_server_ms;
+                if (0..10_000).contains(&age) && state.waiting.is_none() {
+                    self.latency.delivery_ms = Some(age);
+                }
             }
         }
         match (state.waiting, self.barrier_since) {
@@ -2351,8 +2354,14 @@ impl Engine {
         // Past the end: the room has finished this track and the relay is about
         // to move on, so stop rather than chase a position that does not exist.
         if track.duration_ms > 0 && target_ms >= track.duration_ms as i64 {
-            self.player.pause();
             self.drift_ms = None;
+            // A streaming player moves on to the next track by itself as its
+            // file ends, which is a moment after Yandex's listed duration more
+            // often than not. Pausing it for that moment stopped the move on its
+            // own, and the next track had to be staged instead.
+            if !nudging_backend(self.player.as_ref()) {
+                self.player.pause();
+            }
             return;
         }
 
@@ -2995,6 +3004,11 @@ fn accept_seq(previous: Option<u64>, incoming: u64) -> bool {
             incoming > previous || previous.saturating_sub(incoming) > SEQ_RESTART_GAP
         }
     }
+}
+
+/// A backend that closes drift by speed: the streaming one in another process.
+fn nudging_backend(player: &dyn Playback) -> bool {
+    player.supports_rate()
 }
 
 /// Whether a hard seek happened recently enough to hold off another one.

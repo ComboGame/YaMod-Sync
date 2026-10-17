@@ -384,6 +384,10 @@ mod sim {
 
     use super::Mod;
 
+    /// The app is silent this long between a track ending and the next starting
+    /// by itself — measured on Yandex Music 5.123, and what the relay allows for.
+    const APP_GAP_MS: f64 = 450.0;
+
     #[derive(Clone, Default)]
     pub struct Options {
         /// How long the app takes to answer a load.
@@ -527,7 +531,7 @@ mod sim {
                                     {
                                         match player.next() {
                                             Some(next) => {
-                                                player.position -= duration;
+                                                player.position -= duration + APP_GAP_MS;
                                                 player.track = Some(next);
                                             }
                                             None => {
@@ -562,7 +566,7 @@ mod sim {
                                 }
                                 bridge
                                     .send(json!({"t": "player", "state": {
-                                        "track_id": player.track, "position_ms": player.position,
+                                        "track_id": player.track, "position_ms": player.position.max(0.0),
                                         "playing": player.playing, "ended": player.ended, "ours": true,
                                     }}))
                                     .await;

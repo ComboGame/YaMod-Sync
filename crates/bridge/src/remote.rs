@@ -57,6 +57,10 @@ struct State {
     /// Since when the app has said it is on another track of the room's queue
     /// than the staged one, after it confirmed the staged one.
     off_since: Option<Instant>,
+    /// The app has reported since it confirmed the last load. Until it has,
+    /// the position held here is the previous track's — steering by it seeked
+    /// a freshly started track to where the old one ended.
+    heard_since_load: bool,
     position_ms: f64,
     playing: bool,
     ended: bool,
@@ -85,6 +89,7 @@ impl RemotePlayback {
             state: Mutex::new(State {
                 volume: 1.0,
                 rate: 1.0,
+                heard_since_load: true,
                 ..State::default()
             }),
             loaded: Condvar::new(),
@@ -128,6 +133,7 @@ impl RemotePlayback {
         state.reported_track = report.track_id;
         state.reported_ours = report.ours;
         state.reported_at = Some(now);
+        state.heard_since_load = true;
         state.position_ms = report.position_ms.max(0.0);
         state.playing = report.playing;
         state.ended = report.ended;
@@ -148,6 +154,7 @@ impl RemotePlayback {
             state.reported_track = Some(report.track_id.clone());
             state.reported_ours = true;
             state.off_since = None;
+            state.heard_since_load = false;
             Ok(())
         } else {
             Err(report
@@ -339,7 +346,8 @@ impl Playback for RemotePlayback {
     }
 
     fn is_live(&self) -> bool {
-        Self::fresh(&self.state.lock().expect("player state"))
+        let state = self.state.lock().expect("player state");
+        Self::fresh(&state) && state.heard_since_load
     }
 
     fn supports_rate(&self) -> bool {
@@ -656,5 +664,25 @@ mod tests {
         assert!(!player.is_live());
         assert!(!player.lost_track(), "a silent player has not lost anything it is known to");
         assert_eq!(player.playing_track_id().as_deref(), Some("1"));
+    }
+
+    /// The confirmation of a load comes before any report from the new track.
+    /// Until one arrives, the playhead held here is the old track's, and the
+    /// engine must not steer by it.
+    #[test]
+    fn after_a_load_the_player_is_not_steered_until_it_reports_again() {
+        let (player, _ops) = player(Duration::from_secs(1));
+        confirmed(&player, "1");
+        player.report(report("1", 243_000.0, true));
+        player.state.lock().unwrap().staged = Some(track("2"));
+        player.loaded(LoadReport {
+            track_id: "2".to_string(),
+            ok: true,
+            error: None,
+        });
+        assert!(!player.is_live(), "the old track's playhead is not the new one's");
+        player.report(report("2", 120.0, true));
+        assert!(player.is_live());
+        assert!(player.position_ms() < 1_000);
     }
 }

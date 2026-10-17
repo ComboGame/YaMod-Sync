@@ -89,6 +89,14 @@ const READY_TIMEOUT_MS: i64 = 15_000;
 /// «go» reaches every peer before the music is meant to begin.
 const START_LEAD_MS: i64 = 300;
 
+/// How long the app's player is silent between one track ending and the next
+/// one starting by itself. Measured on Yandex Music 5.123: the media element
+/// ends, and the next track's first sample plays about 0.45–0.5 s later. Every
+/// player in the room has the same gap, so the next track's clock starts after
+/// it rather than every player starting half a second behind the room and
+/// spending ten seconds of faster playback catching up.
+const NATURAL_GAP_MS: i64 = 450;
+
 /// How long a room with nobody in it keeps its queue.
 ///
 /// Long enough that stepping out and coming back finds the music where you left
@@ -618,10 +626,10 @@ impl RoomState {
     /// the jump back heard after every natural track change. A peer that does
     /// have to load the track comes in a little late and is pulled into place,
     /// the way any latecomer is.
-    fn continue_at(&mut self, index: usize, ended_at: i64) {
+    fn continue_at(&mut self, index: usize, starts_at: i64) {
         self.index = index;
         self.position_ms = 0;
-        self.at_server_ms = ended_at;
+        self.at_server_ms = starts_at;
         self.barrier = None;
         self.playing = true;
     }
@@ -699,17 +707,18 @@ impl RoomState {
         // When the track actually ended, not when this tick noticed: the next one
         // started then on every player, and the ticker is up to a tick late.
         let ended_at = (self.at_server_ms + duration.saturating_sub(self.position_ms) as i64).min(now);
+        let starts_at = ended_at + NATURAL_GAP_MS;
 
         if self.repeat == RepeatMode::One {
             // The same track from the top, until somebody skips it.
-            self.continue_at(self.index, ended_at);
+            self.continue_at(self.index, starts_at);
         } else if self.index + 1 < self.queue.len() {
-            self.continue_at(self.index + 1, ended_at);
+            self.continue_at(self.index + 1, starts_at);
         } else if self.repeat == RepeatMode::All && !self.queue.is_empty() {
             // Round again, in the same order — shuffled or not. Reshuffling here
             // would change the queue from the ticker, which only ever speaks the
             // playhead; turning shuffle off and on gives a new order.
-            self.continue_at(0, ended_at);
+            self.continue_at(0, starts_at);
         } else {
             // Stop on the last track rather than past it, so a station's next
             // batch has somewhere to take over from.
@@ -1588,7 +1597,7 @@ mod tests {
         let mut state = room_with_two_tracks(0);
         // Run both tracks to the end.
         assert!(state.advance_if_ended(10_000));
-        assert!(state.advance_if_ended(30_000));
+        assert!(state.advance_if_ended(30_000 + NATURAL_GAP_MS));
         assert!(!state.playing, "the queue is spent");
 
         state
@@ -1631,8 +1640,12 @@ mod tests {
         assert_eq!(state.index, 1);
         assert_eq!(state.snapshot().waiting, None, "nobody is waited for");
         assert!(state.playing);
-        assert_eq!(state.at_server_ms, ended, "anchored where the last track ended");
-        assert_eq!(state.derived_position_ms(ended + 70), 70);
+        assert_eq!(
+            state.at_server_ms,
+            ended + NATURAL_GAP_MS,
+            "anchored where the last track ended, after the app's own gap"
+        );
+        assert_eq!(state.derived_position_ms(ended + NATURAL_GAP_MS + 70), 70);
         assert!(state.seq > seq);
     }
 
@@ -1660,14 +1673,14 @@ mod tests {
         assert!(state.advance_if_ended(ended + 50));
         assert_eq!(state.index, 0);
         assert_eq!(state.snapshot().waiting, None);
-        assert_eq!(state.at_server_ms, ended);
+        assert_eq!(state.at_server_ms, ended + NATURAL_GAP_MS);
     }
 
     #[test]
     fn the_last_track_stops_on_itself() {
         let mut state = room_with_two_tracks(0);
         state.advance_if_ended(10_000);
-        assert!(state.advance_if_ended(30_000));
+        assert!(state.advance_if_ended(30_000 + NATURAL_GAP_MS));
         assert!(!state.playing);
         assert_eq!(state.index, 1, "we stay on the last track, not past it");
         assert_eq!(state.position_ms, 20_000);
@@ -1735,7 +1748,7 @@ mod tests {
         let mut state = room_with_two_tracks(0);
         state.apply(Command::SetRepeat { mode: RepeatMode::All }, 1, 0).unwrap();
         state.advance_if_ended(10_000);
-        assert!(state.advance_if_ended(30_000));
+        assert!(state.advance_if_ended(30_000 + NATURAL_GAP_MS));
         assert_eq!(state.index, 0, "back to the first track");
         assert!(state.playing);
         // And «next» on the last track goes round too, instead of refusing.

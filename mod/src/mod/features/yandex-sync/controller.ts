@@ -129,6 +129,8 @@ export type SyncState = {
 const REPORT_EVERY_MS = 200;
 /** Сколько после своей паузы или перемотки не выполнять встречные указания ядра. */
 const USER_HOLD_MS = 1500;
+/** Сколько до конца трека плеер считается «вот-вот перейдёт сам». */
+const FINISHING_MS = 2500;
 /** Через сколько повторить отправку своей очереди, если её не удалось собрать. */
 const SHARE_RETRY_MS = 3000;
 
@@ -296,16 +298,43 @@ async function load(track: TrackRef, seq: number) {
   try {
     const now = sonata.snapshot();
     const alreadyThere = now?.trackId === track.track_id && ours(now);
+    // Плеер доигрывает предыдущий трек нашей очереди и вот-вот перейдёт сам:
+    // комната закончила трек по длительности Яндекса, а файл обычно чуть
+    // длиннее. Переключить его сейчас — значит столкнуться с его собственным
+    // автопереходом: тот прибавляет единицу к уже выставленному индексу, и плеер
+    // уезжал через трек.
+    const finishing =
+      !!now &&
+      !alreadyThere &&
+      found > 0 &&
+      ours(now) &&
+      now.trackId === ids[found - 1] &&
+      now.status === "playing" &&
+      now.durationMs > 0 &&
+      now.durationMs - now.positionMs < FINISHING_MS;
+    let on = alreadyThere || (finishing && (await sonata.waitUntilOn(track.track_id, track.duration_ms, FINISHING_MS + 1000, stale)));
+    if (stale()) {
+      stats.superseded++;
+      return;
+    }
     // Плеер уже на этом треке нашей очереди: перешёл сам в конце предыдущего, и
     // комната догнала. Перезапускать трек незачем — позицию ядро выровняет.
-    if (!alreadyThere) await sonata.stageQueue(contextId, ids, index);
-    else if (found >= 0) sonata.updateQueue(ids, index);
+    if (on && found >= 0) sonata.updateQueue(ids, index);
+    if (!on) {
+      await sonata.stageQueue(contextId, ids, index);
+      on = await sonata.waitUntilOn(track.track_id, track.duration_ms, 1500, stale);
+      // Плеер оказался на другом треке (его автопереход пришёлся на тот же
+      // момент) — поставить ещё раз сразу, а не ждать отказа и повтора ядра.
+      if (!on && !stale() && sonata.snapshot()?.trackId !== track.track_id) {
+        await sonata.stageQueue(contextId, ids, index);
+      }
+    }
     if (stale()) {
       stats.superseded++;
       return;
     }
     // И в том случае, когда плеер перешёл сам: подмена источника ещё может идти.
-    const on = await sonata.waitUntilOn(track.track_id, track.duration_ms, 5000, stale);
+    on = await sonata.waitUntilOn(track.track_id, track.duration_ms, 5000, stale);
     if (stale()) {
       stats.superseded++;
       return;
@@ -615,7 +644,7 @@ function rememberWhatWasPlaying() {
 }
 
 // Для диагностики из devtools.
-(window as any).__yandexSync = { connect, disconnect, command, getSyncState, snapshot: sonata.snapshot, stats };
+(window as any).__yandexSync = { connect, disconnect, command, getSyncState, snapshot: sonata.snapshot, player: sonata.player, stats };
 
 // ---- события моста ---------------------------------------------------------
 
