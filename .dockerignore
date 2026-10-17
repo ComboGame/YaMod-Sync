@@ -1,8 +1,8 @@
 .git
+.github
 target
 dist
-android
+mod
 docs
 release-notes
-crates/android/jniLibs
 .env

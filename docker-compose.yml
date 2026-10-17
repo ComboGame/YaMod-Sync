@@ -1,4 +1,4 @@
-# ymsync-relay на VDS. Гайд: docs/vds-docker.md.
+# Сервер комнаты YandexMusicSync на VDS. Гайд: docs/server.md.
 #
 #   cp .env.example .env    # и впишите пароль комнаты
 #   docker compose up -d --build

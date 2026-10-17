@@ -1,0 +1,43 @@
+# The server side on Linux: the Rust tests and the relay's Docker image, the
+# way it is built on a VDS.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - ".github/workflows/ci.yml"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test --locked --workspace
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Relay image
+        run: docker build -t ymsync-relay:ci .
+      - name: Relay starts and listens
+        run: |
+          docker run -d --name relay -e YMSYNC_ROOM_TOKEN=ci -p 8787:8787 ymsync-relay:ci
+          for i in $(seq 1 20); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8787) 2>/dev/null; then echo "listening"; exit 0; fi
+            sleep 1
+          done
+          docker logs relay; exit 1

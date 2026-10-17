@@ -1,7 +1,7 @@
-# ymsync-relay — комната для совместного прослушивания, для VDS.
+# ymsync-relay — сервер комнаты YandexMusicSync, для VDS.
 #
 # Собирается только релей: у него нет ни звука, ни TLS, ни зависимостей на C,
-# поэтому образ — это один бинарь поверх debian-slim. Гайд: docs/vds-docker.md.
+# поэтому образ — это один бинарь поверх debian-slim. Гайд: docs/server.md.
 
 FROM rust:1-bookworm AS build
 WORKDIR /src

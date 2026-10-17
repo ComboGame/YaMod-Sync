@@ -1,9 +1,9 @@
-//! The ym-sync core, run for a player in another process.
+//! The YandexMusicSync core, run for a player in another process.
 //!
-//! The Yandex Music mod starts this as a child and talks to it over stdin and
-//! stdout (see [`protocol`]). Everything that makes a room work — the relay link,
-//! the shared clock, the queue, «Моя волна» and its feedback to Yandex — is the
-//! same engine the ym-sync apps run; only the [`Playback`] is different: a
+//! The patched Yandex Music app starts this as a child and talks to it over
+//! stdin and stdout (see [`protocol`]). Everything that makes a room work — the
+//! relay link, the shared clock, the queue, «Моя волна» and its feedback to
+//! Yandex — is the core's engine; the [`Playback`] it drives is a
 //! [`remote::RemotePlayback`] that steers the app's own player.
 //!
 //! [`Playback`]: ymsync::playback::Playback

@@ -1,174 +1,99 @@
-# Builds the Windows installer, the CLI tools and the Android APK.
+# Builds the YandexMusicSync installer and publishes it as a GitHub release.
 #
-# A pushed tag `vX.Y.Z` builds everything and opens a *draft* release with the
-# assets attached — nothing is public until the draft is published by hand.
-# «Run workflow» on the Actions page builds the same assets without a release,
-# for trying a branch.
+# The version is mod/VERSION. A push that touches the mod or the Rust crates
+# builds the installer; if there is no release `mod-v<VERSION>` yet, it is
+# published and the tag is created on that commit. Bumping VERSION is how a new
+# release is made. A pushed tag `mod-vX.Y.Z` does the same for an exact commit.
+# «Run workflow» on the Actions page builds the installer without a release, as
+# a downloadable artifact.
 #
-# Secrets (Settings → Secrets and variables → Actions):
-#   TAURI_SIGNING_PRIVATE_KEY           the updater key (contents of the .key file)
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
-#   ANDROID_KEYSTORE_BASE64             base64 of the release .jks
-#   ANDROID_KEYSTORE_PASSWORD           store password
-#   ANDROID_KEY_ALIAS                   key alias
-#   ANDROID_KEY_PASSWORD                key password
-# Without the Tauri key the installer has no .sig and the release step fails;
-# without the Android ones the APK comes out unsigned.
+# The patcher downloads the current stable Yandex Music for Windows, patches it,
+# builds ymsync-bridge from crates/bridge and packs an NSIS installer — all of
+# which needs Windows (MSVC for the bridge, the Windows build of the app).
 
 name: release
 
 on:
   push:
-    tags: ["v*"]
+    branches: ["**"]
+    tags: ["mod-v*"]
+    paths:
+      - "mod/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "release-notes/mod.md"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.read.outputs.version }}
-    steps:
-      - uses: actions/checkout@v5
-      - id: read
-        name: Read and check the version
-        shell: bash
-        run: |
-          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
-          tauri=$(grep -m1 '"version"' crates/gui/tauri.conf.json | sed -E 's/.*: *"(.*)".*/\1/')
-          android=$(grep -m1 'versionName' android/app/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
-          echo "Cargo $version · tauri $tauri · android $android"
-          if [ "$version" != "$tauri" ] || [ "$version" != "$android" ]; then
-            echo "::error::versions disagree"; exit 1
-          fi
-          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match version $version"; exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-  windows:
-    needs: version
+  installer:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
+          # The version that wrote mod/bun.lockb.
+          bun-version: 1.1.27
 
-      - name: Tests
-        run: cargo test -p ymsync-proto -p ymsync-relay -p ymsync
+      - name: Bridge tests
+        run: cargo test --locked -p ymsync-bridge
 
-      - name: Installer
-        working-directory: crates/gui
+      - name: Dependencies
+        working-directory: mod
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx --yes @tauri-apps/cli@2 build
+          # electron-builder fetches its own Electron; the npm one is only for
+          # running the mod from a dev folder.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: bun install
 
-      - name: CLI and relay
-        run: cargo build --release -p ymsync -p ymsync-relay
+      - name: Patch and package
+        working-directory: mod
+        run: bun run start
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: |
-            target/release/bundle/nsis/*-setup.exe
-            target/release/bundle/nsis/*-setup.exe.sig
-            target/release/ymsync.exe
-            target/release/ymsync-relay.exe
-          if-no-files-found: error
-
-  android:
-    needs: version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.13"
-
-      - name: Rust core
-        # The runner's NDK path is a shell variable, not part of the `env`
-        # context, so it is picked up here rather than in an `env:` block.
+      - id: built
+        name: Locate the installer
         run: |
-          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
-          cargo install cargo-ndk --locked
-          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 --platform 26 \
-            -o crates/android/jniLibs build --release -p ymsync-android
-
-      - name: Signing key
-        env:
-          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          if [ -z "$KEYSTORE" ]; then
-            echo "::warning::no signing key — the APK will be unsigned"; exit 0
-          fi
-          echo "$KEYSTORE" | base64 -d > android/release.jks
-          {
-            echo "storeFile=release.jks"
-            echo "storePassword=$STORE_PASSWORD"
-            echo "keyAlias=$KEY_ALIAS"
-            echo "keyPassword=$KEY_PASSWORD"
-          } > android/keystore.properties
-
-      - name: APK
-        working-directory: android
-        run: gradle assembleRelease --console=plain
-
-      - name: Forget the key
-        if: always()
-        run: rm -f android/release.jks android/keystore.properties
+          installer=$(ls mod/.versions/*/mod/dist/YandexMusicSync-Setup-*.exe | head -1)
+          [ -f "$installer" ] || { echo "::error::no installer"; exit 1; }
+          app_version=$(basename "$installer" | sed -E 's/YandexMusicSync-Setup-(.*)\.exe/\1/')
+          mkdir -p dist
+          cp "$installer" dist/
+          (cd dist && sha256sum *.exe > SHA256SUMS.txt)
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "Яндекс Музыка $app_version"; cat dist/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: android
-          path: android/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-
-  release:
-    needs: [version, windows, android]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          path: built
-
-      - name: Assets
-        run: >
-          python3 scripts/release_assets.py
-          --version ${{ needs.version.outputs.version }}
-          --windows built/windows --android built/android
-          --notes release-notes/${{ needs.version.outputs.version }}.md
-          --out dist
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ needs.version.outputs.version }}
+          name: yandex-music-sync-${{ steps.built.outputs.app_version }}
           path: dist/*
+          if-no-files-found: error
 
-      - name: Draft release
-        if: github.ref_type == 'tag'
+      - name: Release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.version.outputs.version }}
+          APP_VERSION: ${{ steps.built.outputs.app_version }}
         run: |
-          notes=release-notes/$VERSION.md
-          [ -f "$notes" ] || { echo "Сборка $VERSION" > /tmp/notes.md; notes=/tmp/notes.md; }
-          gh release create "v$VERSION" dist/* --draft --verify-tag \
-            --title "ym-sync $VERSION" --notes-file "$notes"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="mod-v$(tr -d '[:space:]' < mod/VERSION)"
+          fi
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Релиз $tag уже есть — новый не создаю. Поднимите mod/VERSION для нового релиза."
+            exit 0
+          fi
+          mod_version="${tag#mod-v}"
+          sed "s/{APP_VERSION}/$APP_VERSION/g; s/{MOD_VERSION}/$mod_version/g" release-notes/mod.md > notes.md
+          gh release create "$tag" dist/* --target "$GITHUB_SHA" \
+            --title "Яндекс Музыка Sync $mod_version (Яндекс Музыка $APP_VERSION)" \
+            --notes-file notes.md

@@ -1,0 +1,56 @@
+[package]
+name = "ymsync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["tls-native"]
+
+# TLS through the platform stack: schannel on Windows.
+tls-native = ["reqwest/native-tls", "tokio-tungstenite/native-tls"]
+
+[dependencies]
+anyhow = "1.0.104"
+bytes = "1.12.1"
+directories = "6.0.0"
+futures-util = "0.3.34"
+hex = "0.4.3"
+# Interface addresses, for the room search: a directed broadcast per network is
+# the only way to reach a phone on the Wi-Fi from a machine that also has a VPN.
+if-addrs = "0.13.4"
+md-5 = "0.11.0"
+# The lyrics endpoint wants an HMAC-SHA256 signature, base64-encoded. HMAC itself
+# is a dozen lines over `sha2`; both crates are already in the tree.
+sha2 = "0.10.9"
+base64 = "0.22.1"
+quick-xml = { version = "0.41.0", features = ["serialize"] }
+# `form` is for the two «Мне нравится» endpoints: they are the only writes this
+# app makes, and Yandex takes them as a urlencoded form rather than as JSON.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "charset", "system-proxy", "query", "form"] }
+# `rc` so a snapshot can carry its cached-track list behind an `Arc`: the list
+# runs into the thousands and is cloned into every snapshot, several times a
+# second.
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = "1.0.151"
+# Tags and length for imported local files.
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "flac", "aac", "isomp4", "ogg", "vorbis", "wav", "pcm"] }
+# `tokio::select!` is used by the engine and the relay link, and the cached-track
+# file server reads and writes its sockets by hand.
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "io-util"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake"] }
+toml = "1.1.4"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ymsync-proto = { version = "0.3.1", path = "../proto" }
+# Hosting a room in this process, which is also what makes offline play work: a
+# machine with no internet is the authority for its own room. Default features
+# off — the embedded relay needs neither clap nor a signal handler.
+ymsync-relay = { version = "0.3.1", path = "../relay", default-features = false }
+
+[dev-dependencies]
+# The integration tests put a real relay behind a real `Link`, which is the only
+# way to cover what the client is told when it joins a room already in progress.
+ymsync-relay = { version = "0.3.1", path = "../relay", default-features = false }

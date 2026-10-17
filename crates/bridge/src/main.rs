@@ -1,4 +1,5 @@
-//! `ymsync-bridge`: the ym-sync core for the Yandex Music mod. See the library.
+//! `ymsync-bridge`: the YandexMusicSync core for the patched Yandex Music app.
+//! See the library.
 
 #![forbid(unsafe_code)]
 
