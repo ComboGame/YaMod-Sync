@@ -4,12 +4,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import App from "./App.tsx";
 import { applyClientTweaks } from "./client-tweaks";
+import { applyTheme } from "./theme";
 import { attachModShadow, PortalContainerProvider } from "./lib/shadow";
 
 const queryClient = new QueryClient();
 
 document.addEventListener("DOMContentLoaded", () => {
   applyClientTweaks();
+  // Оформление по умолчанию — сразу, до первой отрисовки, чтобы не мелькал
+  // прежний вид; сохранённый выбор App прочитает следом.
+  applyTheme(true);
 
   // Хост панели — пустой элемент в конце body; всё содержимое в его shadow-корне.
   const host = document.createElement("div");

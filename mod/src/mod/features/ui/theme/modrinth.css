@@ -1,0 +1,538 @@
+/*
+ * Оформление клиента Яндекс Музыки в духе Modrinth App (OLED).
+ *
+ * Как это устроено. Клиент сам целиком построен на своих токенах --ym-* (цвета,
+ * радиусы, отступы, шрифты; блок .ym-dark-theme в его CSS) — тема прежде всего
+ * переопределяет их, и большая часть интерфейса перекрашивается сама. Каркас
+ * окна (сайдбар, верхняя панель, колонка комнаты справа, плеер) и несколько
+ * компонентов меняются правилами по CSS-модулям клиента: их имена вида
+ * «Компонент_часть__хеш» стабильны между версиями (меняется только хеш), поэтому
+ * селекторы — по началу имени, [class*="Компонент_часть__"].
+ *
+ * Всё под html.ymsync-theme: без этого класса файл ничего не делает, и в
+ * настройках мода можно вернуть оригинальный вид. Клиентский DOM не меняется —
+ * верхняя панель и колонка комнаты рисуются модом в своих shadow-корнях поверх
+ * отведённого им места.
+ *
+ * Привязки к клиенту, которые стоит проверять при обновлении: список в CLAUDE.md.
+ */
+
+/* ---- токены -------------------------------------------------------------- */
+
+html.ymsync-theme {
+  /* Поверхности Modrinth OLED: чем выше слой, тем светлее. */
+  --ms-surface-1: #000000;
+  --ms-surface-1-5: #050506;
+  --ms-surface-2: #09090a;
+  --ms-surface-2-5: #0c0d11;
+  --ms-surface-3: #101013;
+  --ms-surface-4: #1b1b20;
+  --ms-surface-5: #25262b;
+  --ms-surface-6: #303138;
+  --ms-border: #1b1b20;
+  --ms-border-strong: #25262b;
+
+  --ms-text-strong: #ffffff;
+  --ms-text: #b0bac5;
+  --ms-text-muted: #96a2b0;
+  --ms-text-faint: #6b7480;
+
+  --ms-brand: #1bd96a;
+  --ms-brand-hover: #42e686;
+  --ms-brand-pressed: #17b85a;
+  --ms-on-brand: #000000;
+  --ms-brand-highlight: rgba(27, 217, 106, 0.16);
+  --ms-brand-ring: rgba(27, 217, 106, 0.45);
+  --ms-red: #ed4661;
+  --ms-orange: #e08325;
+
+  --ms-radius-sm: 0.5rem;
+  --ms-radius-md: 0.75rem;
+  --ms-radius-lg: 1rem;
+  --ms-radius-xl: 1.25rem;
+
+  --ms-font: "YMSync Inter", Inter, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --ms-shadow-card: 0 2px 4px rgba(0, 0, 0, 0.25);
+  --ms-shadow-floating: 0 16px 48px rgba(0, 0, 0, 0.6);
+  --ms-ease: cubic-bezier(0.25, 1, 0.5, 1);
+
+  /* Каркас окна. --ms-dock задаёт мод: ширина колонки комнаты, когда она открыта. */
+  --ms-topbar: 3rem;
+  --ms-rail: 4rem;
+  --ms-dock: 0px;
+
+  color-scheme: dark;
+}
+
+/*
+ * Токены клиента. Тема всегда тёмная: светлая тема клиента получает те же
+ * значения, чтобы оформление не зависело от его настройки.
+ */
+html.ymsync-theme .ym-dark-theme,
+html.ymsync-theme .ym-light-theme {
+  --ym-background-color-primary-enabled-basic: var(--ms-surface-1);
+  --ym-background-color-primary-enabled-content: var(--ms-surface-1);
+  --ym-background-color-primary-enabled-popover: var(--ms-surface-3);
+  --ym-background-color-primary-enabled-overlay: rgba(0, 0, 0, 0.7);
+  --ym-background-color-primary-enabled-vibe: var(--ms-surface-1);
+  --ym-background-color-primary-enabled-header: rgba(0, 0, 0, 0.82);
+  --ym-background-color-primary-enabled-player: var(--ms-surface-2-5);
+  --ym-background-color-primary-enabled-tooltip: var(--ms-surface-5);
+  --ym-background-color-primary-enabled-menu: rgba(16, 16, 19, 0.97);
+  --ym-background-color-primary-enabled-shimmer: linear-gradient(90deg, #101013 40%, #1b1b20 50%, #101013 60%);
+  --ym-background-color-secondary-enabled-blur: var(--ms-surface-5);
+  --ym-background-color-secondary-enabled-shimmer: linear-gradient(90deg, #101013 40%, #1b1b20 50%, #101013 60%);
+
+  --ym-logo-color-primary-enabled: var(--ms-text-strong);
+  --ym-logo-color-primary-variant: var(--ms-brand);
+  --ym-logo-color-primary-player: var(--ms-brand);
+  --ym-logo-color-primary-text: var(--ms-brand);
+
+  /* Главная кнопка и акцент: жёлтый клиента становится зелёным Modrinth. */
+  --ym-controls-color-primary-default-disabled: var(--ms-surface-4);
+  --ym-controls-color-primary-default-enabled: var(--ms-brand);
+  --ym-controls-color-primary-default-hovered: var(--ms-brand-hover);
+  --ym-controls-color-primary-default-pressed: var(--ms-brand-pressed);
+  --ym-controls-color-primary-default-focused_stroke: var(--ms-brand-ring);
+  --ym-controls-color-primary-on_default-disabled: var(--ms-text-faint);
+  --ym-controls-color-primary-on_default-enabled: var(--ms-on-brand);
+  --ym-controls-color-primary-outline-disabled: var(--ms-surface-4);
+  --ym-controls-color-primary-outline-enabled: var(--ms-surface-5);
+  --ym-controls-color-primary-outline-hovered: var(--ms-surface-6);
+  --ym-controls-color-primary-outline-hovered_stroke: var(--ms-brand-hover);
+  --ym-controls-color-primary-outline-selected_stroke: var(--ms-brand);
+  --ym-controls-color-primary-outline-pressed: var(--ms-surface-6);
+  --ym-controls-color-primary-outline-focused_stroke: var(--ms-brand-ring);
+  --ym-controls-color-primary-on_outline-disabled: var(--ms-text-faint);
+  --ym-controls-color-primary-on_outline-enabled: var(--ms-text-strong);
+  --ym-controls-color-primary-text-disabled: var(--ms-text-faint);
+  --ym-controls-color-primary-text-enabled: var(--ms-text-muted);
+  --ym-controls-color-primary-text-enabled_variant: var(--ms-text-strong);
+  --ym-controls-color-primary-text-hovered: var(--ms-text-strong);
+  --ym-controls-color-primary-text-hovered_variant: var(--ms-text-strong);
+  --ym-controls-color-primary-text-vibe: linear-gradient(180deg, #fff 8%, #d8dde3 78%);
+  --ym-controls-color-primary-text-vibe_icon: var(--ms-text);
+
+  /* Второстепенные кнопки — тёмные плашки, как «Новая группа» у Modrinth. */
+  --ym-controls-color-secondary-default-disabled: var(--ms-surface-3);
+  --ym-controls-color-secondary-default-enabled: var(--ms-surface-4);
+  --ym-controls-color-secondary-default-hovered: var(--ms-surface-5);
+  --ym-controls-color-secondary-default-pressed: var(--ms-surface-6);
+  --ym-controls-color-secondary-default-focused: var(--ms-surface-4);
+  --ym-controls-color-secondary-default-focused_stroke: var(--ms-brand-ring);
+  --ym-controls-color-secondary-on_default-disabled: var(--ms-text-faint);
+  --ym-controls-color-secondary-on_default-enabled: var(--ms-text-strong);
+  --ym-controls-color-secondary-on_default-enabled_variant: var(--ms-text-muted);
+  --ym-controls-color-secondary-on_default-hovered: var(--ms-text-strong);
+  --ym-controls-color-secondary-outline-disabled_stroke: var(--ms-surface-4);
+  --ym-controls-color-secondary-outline-enabled_stroke: var(--ms-surface-5);
+  --ym-controls-color-secondary-outline-hovered_stroke: var(--ms-surface-6);
+  --ym-controls-color-secondary-outline-selected: var(--ms-brand-highlight);
+  --ym-controls-color-secondary-outline-selected_stroke: var(--ms-brand);
+  --ym-controls-color-secondary-outline-pressed: var(--ms-surface-5);
+  --ym-controls-color-secondary-outline-focused_stroke: var(--ms-brand-ring);
+  --ym-controls-color-secondary-on_outline-disabled: var(--ms-text-faint);
+  --ym-controls-color-secondary-on_outline-enabled: var(--ms-text-strong);
+  --ym-controls-color-secondary-on_outline-enabled_variant: var(--ms-text-muted);
+  --ym-controls-color-secondary-text-disabled: var(--ms-surface-4);
+  --ym-controls-color-secondary-text-enabled: var(--ms-text-muted);
+  --ym-controls-color-secondary-text-enabled_variant: var(--ms-text-strong);
+  --ym-controls-color-secondary-text-hovered: var(--ms-text-strong);
+  --ym-controls-color-secondary-text-selected: var(--ms-text-strong);
+  --ym-controls-color-secondary-card-disabled: var(--ms-surface-4);
+  --ym-controls-color-secondary-card-enabled: var(--ms-surface-2-5);
+  --ym-controls-color-secondary-card-hovered: var(--ms-surface-3);
+
+  --ym-controls-color-accent-default-enabled: var(--ms-red);
+  --ym-controls-color-accent-default-hovered: #f06178;
+  --ym-message-color-successful-text-enabled: var(--ms-brand);
+  --ym-message-color-error-text-enabled: var(--ms-red);
+
+  --ym-outline-color-primary-disabled: var(--ms-border);
+  --ym-surface-color-primary-enabled-list: var(--ms-surface-3);
+  --ym-slider-color-primary-disabled: var(--ms-surface-4);
+  --ym-slider-color-primary-progress: var(--ms-surface-6);
+  --ym-slider-color-primary-enabled: var(--ms-brand);
+
+  /* Скругления Modrinth: кнопки 12px, карточки 16px, «таблетки» — тоже 12px. */
+  --ym-radius-size-s: 0.375rem;
+  --ym-radius-size-m: 0.625rem;
+  --ym-radius-size-l: 0.75rem;
+  --ym-radius-size-xl: 1rem;
+  --ym-radius-size-xxl: 1rem;
+  --ym-radius-size-xxxl: 0.75rem;
+
+  --ym-font-text: var(--ms-font);
+  --ym-font-heading: var(--ms-font);
+  --ym-font-family-text: var(--ms-font);
+  --ym-letter-spacing-s: 0;
+  --ym-letter-spacing-m: -0.005em;
+  --ym-letter-spacing-l: -0.015em;
+
+  --ym-duration-transition: 0.2s;
+}
+
+/* ---- каркас окна --------------------------------------------------------- */
+
+html.ymsync-theme body {
+  background: var(--ms-surface-1);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Кнопки окна клиента — на высоте верхней панели мода. */
+html.ymsync-theme [class*="TitleBar_root__"] {
+  --title-bar-height: var(--ms-topbar);
+  --title-bar-button-width: 2.75rem;
+  width: auto;
+  inset-inline-start: auto;
+  z-index: calc(var(--ym-z-index-overlay) + 2);
+}
+html.ymsync-theme [class*="TitleBar_icon__"] {
+  color: var(--ms-text);
+}
+
+/*
+ * Сетка: сайдбар во всю высоту слева, справа рабочая область — контент и плеер
+ * под ним. Сверху место под верхнюю панель, справа — под колонку комнаты.
+ */
+html.ymsync-theme [class*="CommonLayout_root__"][class*="DefaultLayout_root"] {
+  --ym-layout-border: 0;
+  --ym-layout-border-radius: 0;
+  --ym-layout-background-color: var(--ms-surface-1);
+  grid-template:
+    "navbar content" minmax(0, 1fr)
+    "navbar playerbar" auto
+    "navbar barBelow" auto / var(--ms-rail) minmax(0, 1fr);
+  grid-column-gap: 0;
+  padding: var(--ms-topbar) var(--ms-dock) 0 0;
+  background: var(--ms-surface-1);
+  transition: padding 0.2s var(--ms-ease);
+}
+
+/* Рабочая область: тонкая рамка сверху и слева со скруглённым углом — как
+   страница в Modrinth App, отделённая от «хрома» окна. */
+html.ymsync-theme [class*="CommonLayout_content__"] {
+  margin: 0;
+  min-height: 0;
+  border-top: 1px solid var(--ms-border);
+  border-left: 1px solid var(--ms-border);
+  border-top-left-radius: var(--ms-radius-xl);
+  background: var(--ms-surface-1);
+  overflow: hidden;
+}
+html.ymsync-theme [class*="CommonLayout_content__"] > main {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* Главная с «Моей волной» клиент рисует без рамок на градиенте во всё окно. */
+html.ymsync-theme [class*="DefaultLayout_rootNewVibe__"] {
+  background: var(--ms-surface-1) !important;
+}
+
+/* ---- сайдбар ------------------------------------------------------------- */
+
+html.ymsync-theme aside[class*="Navbar_root__"] {
+  --navbar-width: var(--ms-rail);
+  width: var(--ms-rail);
+  margin: 0;
+  padding-block: 0.5rem 0.75rem;
+  height: 100%;
+}
+html.ymsync-theme [class*="NavbarDesktop_root__"] {
+  width: var(--ms-rail);
+  align-items: center;
+}
+/* Логотип — в верхней панели, сворачивать нечего. */
+html.ymsync-theme [class*="NavbarDesktop_logoWrapper__"],
+html.ymsync-theme [class*="NavbarDesktop_collapseButton__"] {
+  display: none !important;
+}
+html.ymsync-theme [class*="NavbarDesktop_scrollableContainer__"],
+html.ymsync-theme [class*="NavbarDesktop_scrollableContent__"] {
+  width: var(--ms-rail);
+  align-items: center;
+}
+html.ymsync-theme nav[class*="NavbarDesktop_navigation__"] {
+  width: var(--ms-rail);
+  margin: 0 0 0.5rem 0;
+  padding: 0;
+  display: flex;
+  justify-content: center;
+}
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.375rem;
+  width: auto;
+  padding-bottom: 0.75rem;
+  margin-bottom: 0.25rem;
+  border-bottom: 1px solid var(--ms-border);
+}
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] > li {
+  width: auto;
+}
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] > li > a {
+  width: 3rem;
+  height: 3rem;
+  min-height: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ms-radius-lg);
+  color: var(--ms-text-muted);
+  background: transparent;
+  transition: background-color 0.15s, color 0.15s;
+}
+/* Подпись прячется, иконка — по центру. Подсказку ставит мод (title у ссылки). */
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] > li > a > div:not(:first-child) {
+  display: none;
+}
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] > li > a > div:first-child {
+  margin: 0;
+  display: flex;
+}
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] > li > a svg {
+  width: 1.5rem;
+  height: 1.5rem;
+  color: inherit;
+}
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] > li > a:hover {
+  background: var(--ms-surface-4);
+  color: var(--ms-text-strong);
+}
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] > li[aria-current="page"] > a {
+  background: var(--ms-brand-highlight);
+  color: var(--ms-brand);
+}
+html.ymsync-theme ol[class*="NavbarDesktop_navigationGroup__"] > li > a:focus-visible {
+  outline: 2px solid var(--ms-brand-ring);
+  outline-offset: 2px;
+}
+
+/* Закреплённое — обложками, как сборки в сайдбаре Modrinth. */
+html.ymsync-theme [class*="NavbarDesktop_pinsList__"] {
+  width: var(--ms-rail);
+  padding-inline: 0;
+}
+html.ymsync-theme [class*="Pin_link__"],
+html.ymsync-theme [class*="Pin_root_withoutLink__"] {
+  justify-content: center;
+  padding: 0.25rem;
+}
+html.ymsync-theme [class*="Pin_info__"],
+html.ymsync-theme [class*="Pin_contextMenu__"] {
+  display: none !important;
+}
+html.ymsync-theme [class*="Pin_cover__"] {
+  --ym-icon-size-l: 2.5rem;
+  border-radius: var(--ms-radius-md);
+  overflow: hidden;
+}
+
+/* Профиль внизу — только аватар. */
+html.ymsync-theme [class*="NavbarDesktopUserWidget_userProfileContainer__"] {
+  justify-content: center;
+  padding: 0;
+  height: auto;
+  margin-top: 0.5rem;
+}
+html.ymsync-theme [class*="NavbarDesktopUserWidget_userProfile__"] {
+  margin: 0;
+  width: auto;
+  justify-content: center;
+}
+html.ymsync-theme [class*="NavbarDesktopUserWidget_userProfile__"] [class*="UserProfile_meta__"] {
+  display: none;
+}
+
+/* ---- плеер внизу --------------------------------------------------------- */
+
+/* Плеер — карточка под контентом, как строка «Недавнее» у Modrinth. */
+html.ymsync-theme section[data-test-id="PLAYERBAR_DESKTOP"] {
+  width: auto !important;
+  min-width: 0;
+  margin: 0.5rem 0.75rem 0.75rem 0.75rem;
+  border-radius: var(--ms-radius-lg);
+  border: 1px solid var(--ms-border);
+  background: var(--ms-surface-2-5);
+  overflow: hidden;
+}
+html.ymsync-theme [class*="PlayerBarDesktopWithBackgroundProgressBar_playerBar__"] {
+  background: transparent;
+}
+/* Прогресс на фоне всего плеера — едва заметной зеленью. */
+html.ymsync-theme [class*="ChangeTimecodeBackground_backgroundProgressbar__"] {
+  opacity: 0.35;
+  filter: saturate(0.6);
+}
+
+/* ---- главная: «Моя волна» ------------------------------------------------ */
+
+/*
+ * Главная клиента — «Моя волна»: колесо пресетов слева и сама волна справа,
+ * во всё окно. Здесь это две карточки, как блоки на главной Modrinth: колонка
+ * «пресеты» и большая карточка волны, в которой живут её анимация и свечение.
+ * Колесо — трёхмерный свайпер, его механика не трогается, меняется только рамка.
+ */
+html.ymsync-theme [class*="VibePage_root__"][class*="VibePage_bigCardPanel__"] {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 1rem;
+  gap: 1rem;
+  align-items: stretch;
+}
+html.ymsync-theme [class*="VibePage_wheel__"] {
+  flex: 0 0 min(36%, 22rem);
+  max-height: none;
+  height: 100%;
+  position: relative;
+  z-index: 1;
+}
+/* Колесо гасит свои края маской, а с ними и рамку — поэтому карточка под ним
+   нарисована отдельно, той же ширины. */
+html.ymsync-theme [class*="VibePage_root__"][class*="VibePage_bigCardPanel__"] {
+  position: relative;
+}
+html.ymsync-theme [class*="VibePage_root__"][class*="VibePage_bigCardPanel__"]::before {
+  content: "";
+  position: absolute;
+  inset: 1rem auto 1rem 1rem;
+  width: min(36%, 22rem);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-surface-2-5);
+  pointer-events: none;
+}
+html.ymsync-theme [class*="WheelDesktop_wrapper__"] {
+  margin-inline: auto;
+  max-width: calc(100% - 1.5rem);
+}
+html.ymsync-theme [class*="VibePage_meta__"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  position: relative;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-surface-1);
+  overflow: hidden;
+  isolation: isolate;
+}
+html.ymsync-theme [class*="MainPage_betaSlot__"] {
+  display: none;
+}
+
+/* ---- общие компоненты ---------------------------------------------------- */
+
+html.ymsync-theme ::selection {
+  background: var(--ms-brand-highlight);
+}
+
+html.ymsync-theme ::-webkit-scrollbar-thumb {
+  background-color: var(--ms-surface-5);
+}
+
+/* Заголовки блоков — как «Недавнее» и «Библиотека»: 24px, жирный Inter. */
+html.ymsync-theme [class*="BlockHeader_title__"] {
+  font-size: 1.5rem;
+  line-height: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* Карточки альбомов, плейлистов и артистов — на своей плашке с рамкой. */
+html.ymsync-theme [class*="AlbumCard_root__"],
+html.ymsync-theme [class*="PlaylistCard_root__"],
+html.ymsync-theme [class*="ArtistCard_root__"] {
+  padding: 0.75rem;
+  border-radius: var(--ms-radius-lg);
+  border: 1px solid var(--ms-border);
+  background: var(--ms-surface-2-5);
+  transition: background-color 0.15s, border-color 0.15s;
+}
+html.ymsync-theme [class*="AlbumCard_root__"]:hover,
+html.ymsync-theme [class*="PlaylistCard_root__"]:hover,
+html.ymsync-theme [class*="ArtistCard_root__"]:hover {
+  background: var(--ms-surface-3);
+  border-color: var(--ms-border-strong);
+}
+html.ymsync-theme [class*="AlbumCard_cover__"],
+html.ymsync-theme [class*="PlaylistCard_cover__"] {
+  border-radius: var(--ms-radius-md);
+  overflow: hidden;
+}
+
+/* Строки треков. */
+html.ymsync-theme [class*="CommonTrack_root__"] {
+  border-radius: var(--ms-radius-md);
+}
+
+/* Поле поиска. */
+html.ymsync-theme [class*="SearchPage_input__"] {
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-surface-3);
+  border: 1px solid var(--ms-border-strong);
+  box-shadow: none;
+}
+html.ymsync-theme [class*="SearchPage_input__"]:focus-within {
+  border-color: var(--ms-brand);
+  box-shadow: 0 0 0 3px var(--ms-brand-highlight);
+}
+
+/* Шапка внутренних страниц — со своими «назад» и «вперёд»: они есть в верхней
+   панели мода. */
+html.ymsync-theme [class*="InnerHeader_root__"] [class*="CommonHeader_leftBlock__"] > :first-child {
+  display: none;
+}
+
+/* Настройки клиента — одной карточкой со строками через разделитель, как
+   раздел настроек Modrinth. */
+html.ymsync-theme ul[class*="Settings_root__"] {
+  max-width: 44rem;
+  width: 100%;
+  padding: 0.25rem 1.25rem;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-surface-2-5);
+}
+html.ymsync-theme li[class*="Settings_item__"] {
+  padding-block: 1rem;
+  margin: 0;
+  border-top: 1px solid var(--ms-border);
+}
+html.ymsync-theme li[class*="Settings_item__"]:first-child {
+  border-top: 0;
+}
+
+/* Меню, всплывающие окна и подсказки — слой выше страницы с тонкой рамкой. */
+html.ymsync-theme [role="menu"] {
+  border: 1px solid var(--ms-border-strong);
+  border-radius: var(--ms-radius-md);
+  box-shadow: var(--ms-shadow-floating);
+}
+html.ymsync-theme [role="menu"] [role="menuitem"] {
+  border-radius: var(--ms-radius-sm);
+}
+html.ymsync-theme [role="menu"] [role="menuitem"]:hover,
+html.ymsync-theme [role="menu"] [role="menuitem"]:focus-visible {
+  background: var(--ms-surface-4);
+}
+html.ymsync-theme [role="dialog"]:not([id^="ymsync"]) {
+  border-color: var(--ms-border-strong);
+}
+
+/* Видимый фокус клавиатуры везде, где клиент его гасит. */
+html.ymsync-theme :is(a, button, [role="button"], [role="menuitem"], input):focus-visible {
+  outline: 2px solid var(--ms-brand-ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.ymsync-theme * {
+    transition-duration: 0.01ms !important;
+  }
+}

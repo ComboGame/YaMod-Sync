@@ -39,6 +39,32 @@ export function panelOut(panel: Element | null, backdrop: Element | null, done: 
   animate(panel, { opacity: [1, 0], x: [0, -16], duration: 160, ease: "inQuad", onComplete: done });
 }
 
+/** Модальное окно по центру: проявляется с лёгким приближением. */
+export function modalIn(dialog: Element | null, backdrop: Element | null) {
+  if (!dialog) return;
+  if (reducedMotion()) {
+    utils.set([dialog, ...list(backdrop)], { opacity: 1, scale: 1 });
+    return;
+  }
+  if (backdrop) animate(backdrop, { opacity: [0, 1], duration: 180, ease: "outQuad" });
+  animate(dialog, { opacity: [0, 1], scale: [0.97, 1], y: [8, 0], duration: 220, ease: "outQuart" });
+}
+
+export function modalOut(dialog: Element | null, backdrop: Element | null, done: () => void) {
+  if (!dialog || reducedMotion()) {
+    done();
+    return;
+  }
+  if (backdrop) animate(backdrop, { opacity: [1, 0], duration: 150, ease: "outQuad" });
+  animate(dialog, { opacity: [1, 0], scale: [1, 0.98], duration: 150, ease: "inQuad", onComplete: done });
+}
+
+/** Колонка справа: выезжает из-за края окна. */
+export function dockIn(target: Element | null) {
+  if (!target || reducedMotion()) return;
+  animate(target, { opacity: [0, 1], x: [24, 0], duration: 220, ease: "outQuart" });
+}
+
 /** Новый экран или новый трек: содержимое чуть сдвигается и проявляется, по очереди. */
 export function contentIn(targets: Targets, from: { x?: number; y?: number } = { y: 6 }) {
   const els = list(targets);
