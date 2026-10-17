@@ -16,7 +16,7 @@ pub use message::{
     ClientMsg, Command, Event, PROTOCOL_VERSION, PeerShare, PlaybackState, RepeatMode,
     RosterEntry, ServerMsg, TrackRef,
 };
-pub use sync::{Correction, SyncParams, decide, target_position_ms, trust_clock};
+pub use sync::{Correction, NudgeParams, SyncParams, decide, decide_with, target_position_ms, trust_clock};
 
 /// Wall-clock milliseconds since the Unix epoch.
 ///

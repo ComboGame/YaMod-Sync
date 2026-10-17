@@ -136,6 +136,7 @@ export async function connect(config: SyncConfig) {
 export async function disconnect() {
   await sync?.stop();
   stopReporting();
+  void sonata.setRate(1);
   setState({ session: "stopped", room: null, activity: null });
 }
 
@@ -157,6 +158,10 @@ async function handleOp(message: any) {
   switch (message.op) {
     case "load":
       return load(message.track as TrackRef);
+    case "rate":
+      // Скорость относится к очереди комнаты, как и остальные указания.
+      if (!sonata.snapshot()?.contextId?.startsWith(sonata.OUR_CONTEXT_PREFIX)) return;
+      return sonata.setRate(Number(message.rate));
     case "play":
     case "pause":
     case "seek":
@@ -199,6 +204,8 @@ async function load(track: TrackRef) {
     // по кнопке «вперёд», и комната догнала. Перезапускать трек незачем — позицию
     // ядро выровняет.
     if (!alreadyThere) await sonata.stageQueue(contextId, ids, index);
+    // И в том случае, когда плеер перешёл сам: подмена источника ещё может идти.
+    await sonata.waitUntilOn(track.track_id, track.duration_ms);
     announcedForeign = null;
     sync?.reportLoaded({ track_id: track.track_id, ok: true });
   } catch (error) {
@@ -397,6 +404,7 @@ sync?.onEvent((message: any) => {
       });
       if (message.state === "stopped") {
         stopReporting();
+        void sonata.setRate(1);
             } else {
         if (message.state === "connected") rememberWhatWasPlaying();
         startReporting();
@@ -410,6 +418,7 @@ sync?.onEvent((message: any) => {
       break;
     case "bridge_exit":
       stopReporting();
+      void sonata.setRate(1);
           setState({
         session: "stopped",
         room: null,

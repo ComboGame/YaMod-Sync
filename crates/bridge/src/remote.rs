@@ -44,6 +44,8 @@ struct State {
     /// When `position_ms` was true.
     at: Option<Instant>,
     volume: f32,
+    /// The speed the app was last told to play at; 1.0 is normal.
+    rate: f64,
 }
 
 pub struct RemotePlayback {
@@ -63,6 +65,7 @@ impl RemotePlayback {
             ops,
             state: Mutex::new(State {
                 volume: 1.0,
+                rate: 1.0,
                 ..State::default()
             }),
             loaded: Condvar::new(),
@@ -70,11 +73,17 @@ impl RemotePlayback {
         }
     }
 
-    /// Forgets the staged track, for a new session.
+    /// Forgets the staged track, for a new session, and puts the speed back to
+    /// normal: the new session's engine starts out assuming it is.
     pub fn reset(&self) {
         let mut state = self.state.lock().expect("player state");
         state.staged = None;
         state.load = None;
+        if state.rate != 1.0 {
+            state.rate = 1.0;
+            drop(state);
+            self.send(PlayerOp::Rate { rate: 1.0 });
+        }
     }
 
     /// Sends the staged track to the app again — for a window that reloaded and
@@ -129,7 +138,7 @@ impl RemotePlayback {
         };
         let elapsed = at.elapsed();
         if state.playing && elapsed < STALE_REPORT {
-            state.position_ms + elapsed.as_secs_f64() * 1000.0
+            state.position_ms + elapsed.as_secs_f64() * 1000.0 * state.rate
         } else {
             state.position_ms
         }
@@ -256,6 +265,22 @@ impl Playback for RemotePlayback {
     fn current_track_id(&self) -> Option<String> {
         let state = self.state.lock().expect("player state");
         state.staged.as_ref().map(|t| t.track_id.clone())
+    }
+
+    fn supports_rate(&self) -> bool {
+        true
+    }
+
+    fn set_rate(&self, rate: f32) {
+        {
+            let mut state = self.state.lock().expect("player state");
+            // The estimate so far ran at the old speed; from here on, the new one.
+            let position = Self::current_position(&state);
+            state.position_ms = position;
+            state.at = Some(Instant::now());
+            state.rate = f64::from(rate);
+        }
+        self.send(PlayerOp::Rate { rate });
     }
 
     fn set_volume(&self, volume: f32) {
@@ -416,6 +441,31 @@ mod tests {
         player.restage();
         assert!(matches!(ops.try_recv(), Ok(PlayerOp::Load { track }) if track.track_id == "7"));
         assert_eq!(player.current_track_id().as_deref(), Some("7"));
+    }
+
+    /// The position estimate runs at the speed the app was told to play at.
+    #[test]
+    fn a_slower_speed_slows_the_estimate_and_goes_out() {
+        let (player, mut ops) = player(Duration::from_secs(1));
+        player.state.lock().unwrap().staged = Some(track("1"));
+        player.report(PlayerReport {
+            track_id: Some("1".to_string()),
+            position_ms: 10_000.0,
+            playing: true,
+            ended: false,
+        });
+        player.set_rate(0.5);
+        assert!(matches!(ops.try_recv(), Ok(PlayerOp::Rate { rate }) if rate == 0.5));
+        std::thread::sleep(Duration::from_millis(200));
+        let position = player.position_ms();
+        // 200 ms at half speed is 100 ms of track, give or take the scheduler.
+        assert!((10_080..10_160).contains(&position), "{position}");
+
+        // A new session starts at normal speed, and the app is told so.
+        player.reset();
+        assert!(matches!(ops.try_recv(), Ok(PlayerOp::Rate { rate }) if rate == 1.0));
+        player.reset();
+        assert!(ops.try_recv().is_err(), "already normal: nothing to say");
     }
 
     #[test]

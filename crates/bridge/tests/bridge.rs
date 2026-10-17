@@ -57,6 +57,42 @@ impl Mod {
     }
 }
 
+impl Mod {
+    /// Everything the bridge says within `ms`.
+    async fn drain(&mut self, ms: u64) -> Vec<Value> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+        let mut out = Vec::new();
+        while let Ok(Ok(Some(line))) = tokio::time::timeout_at(deadline, self.from_bridge.next_line()).await {
+            out.push(serde_json::from_str(&line).unwrap());
+        }
+        out
+    }
+
+    async fn report(&mut self, track: &str, position_ms: f64, playing: bool) {
+        self.send(json!({"t": "player", "state": {"track_id": track, "position_ms": position_ms, "playing": playing}}))
+            .await;
+    }
+}
+
+fn start_config(url: &str, name: &str, data_dir: &std::path::Path) -> Value {
+    json!({
+        "t": "start",
+        "config": {"relay": url, "room": "test", "password": TOKEN, "name": name, "data_dir": data_dir.to_string_lossy()}
+    })
+}
+
+fn cached_data_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ymsync-bridge-test-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache = Cache::open(dir.join("tracks"), 0).unwrap();
+    cache.insert(&track("42"), b"not really audio", true).unwrap();
+    dir
+}
+
+fn op(message: &Value) -> Option<&str> {
+    (message["t"] == "player").then(|| message["op"].as_str()).flatten()
+}
+
 fn start_bridge() -> Mod {
     let (to_bridge, bridge_in) = tokio::io::duplex(64 * 1024);
     let (bridge_out, from_bridge) = tokio::io::duplex(1024 * 1024);
@@ -190,4 +226,72 @@ async fn an_unreachable_room_is_retried_and_said_so() {
     app.send(json!({"t": "stop"})).await;
     app.send(json!({"t": "quit"})).await;
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The stutter on every track change: the app's player moves on to the next
+/// track by itself as one ends, while the room still waits for everyone's
+/// «ready». The player must be left running through that wait — not paused and
+/// restarted — and its head start taken back by speed once the room starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_track_the_app_already_plays_runs_on_through_the_wait_and_is_slowed_not_seeked() {
+    let mut relay = ymsync_relay::bind("127.0.0.1:0", TOKEN).await.expect("relay");
+    let url = format!("ws://{}", relay.local_addr());
+    let (dir_a, dir_b) = (cached_data_dir("run-on-a"), cached_data_dir("run-on-b"));
+
+    let mut a = start_bridge();
+    let mut b = start_bridge();
+    a.send(start_config(&url, "a", &dir_a)).await;
+    a.expect("a in", |m| m["t"] == "status" && m["state"] == "connected").await;
+    b.send(start_config(&url, "b", &dir_b)).await;
+    b.expect("b in", |m| m["t"] == "status" && m["state"] == "connected").await;
+
+    a.send(json!({"t": "command", "command": {"c": "set_queue", "start": 0, "tracks": [serde_json::to_value(track("42")).unwrap()]}}))
+        .await;
+    a.expect("a load", |m| op(m) == Some("load")).await;
+    b.expect("b load", |m| op(m) == Some("load")).await;
+
+    // A has it and is already playing it; B takes its time, so the room waits.
+    a.send(json!({"t": "loaded", "result": {"track_id": "42", "ok": true}})).await;
+    let mut position = 0.0;
+    for _ in 0..7 {
+        a.report("42", position, true).await;
+        for message in a.drain(100).await {
+            assert!(
+                !matches!(op(&message), Some("pause" | "seek")),
+                "the room is waiting and the app's player was told {message}"
+            );
+        }
+        position += 100.0;
+    }
+
+    b.send(json!({"t": "loaded", "result": {"track_id": "42", "ok": true}})).await;
+    b.report("42", 0.0, false).await;
+
+    // The room starts behind A: A slows down instead of jumping back.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let rate = loop {
+        assert!(tokio::time::Instant::now() < deadline, "A was never slowed down");
+        a.report("42", position, true).await;
+        let mut found = None;
+        for message in a.drain(100).await {
+            match op(&message) {
+                Some("pause" | "seek") => panic!("A was told {message} instead of being slowed"),
+                Some("rate") => found = message["rate"].as_f64(),
+                _ => {}
+            }
+        }
+        position += 100.0;
+        if let Some(rate) = found {
+            break rate;
+        }
+    };
+    assert!(rate < 1.0 && rate >= 0.95, "{rate}");
+
+    for app in [&mut a, &mut b] {
+        app.send(json!({"t": "quit"})).await;
+    }
+    relay.stop().await;
+    for dir in [dir_a, dir_b] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

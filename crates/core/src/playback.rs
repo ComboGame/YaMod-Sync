@@ -53,4 +53,15 @@ pub trait Playback: Send + Sync + 'static {
 
     fn set_volume(&self, volume: f32);
     fn volume(&self) -> f32;
+
+    /// Whether this backend can change speed without a seek. Such a backend
+    /// closes small drift by playing a little faster or slower — see
+    /// [`ymsync_proto::NudgeParams`] — because a seek is what it cannot afford.
+    fn supports_rate(&self) -> bool {
+        false
+    }
+
+    /// Plays at `rate` of normal speed, pitch kept. Only called when
+    /// [`Playback::supports_rate`] says so.
+    fn set_rate(&self, _rate: f32) {}
 }

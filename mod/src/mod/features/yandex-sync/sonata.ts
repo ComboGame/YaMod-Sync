@@ -199,10 +199,11 @@ export function trackFromMeta(meta: any): TrackRef | null {
 }
 
 /**
- * Ставит очередь комнаты в плеер на паузе, на треке `index`.
+ * Ставит очередь комнаты в плеер на треке `index`.
  *
  * Если очередь та же (тот же id контекста и те же треки), плеер только
- * переключает трек — без остановки и перезагрузки контекста.
+ * переключает трек — без перезагрузки контекста. Играл ли он до этого или
+ * стоял, так и остаётся: ядро само скажет, что делать, когда комната стартует.
  */
 export async function stageQueue(contextId: string, ids: string[], index: number): Promise<void> {
   const p = player();
@@ -216,11 +217,7 @@ export async function stageQueue(contextId: string, ids: string[], index: number
     list.every((item, i) => String(item?.entity?.data?.meta?.id) === ids[i]);
 
   if (sameList) {
-    if ((state.queueState.index.value ?? -1) !== index) {
-      await asMod(() => p.pause());
-      await asMod(() => p.setEntityByIndex(index));
-      await asMod(() => p.pause());
-    }
+    if ((state.queueState.index.value ?? -1) !== index) await asMod(() => p.setEntityByIndex(index));
   } else {
     await asMod(() => p.pause());
     await asMod(() =>
@@ -232,7 +229,30 @@ export async function stageQueue(contextId: string, ids: string[], index: number
       }),
     );
   }
-  await asMod(() => p.setProgress(0));
+}
+
+/**
+ * Ждёт, пока плеер действительно встанет на трек.
+ *
+ * setEntityByIndex и setContext завершаются раньше, чем плеер подменит
+ * источник звука: ещё ~0,4 с он показывает новый id, но длительность и
+ * воспроизведение старого трека. Указания ядра, выполненные в это окно,
+ * доставались старому треку — короткий кусок не того трека и повтор начала
+ * нового. Признак, что подмена прошла: длительность совпала с длительностью
+ * трека из очереди комнаты (или звук ещё не загружался вовсе).
+ */
+export async function waitUntilOn(trackId: string, durationMs: number, timeoutMs = 5000): Promise<boolean> {
+  const started = performance.now();
+  while (performance.now() - started < timeoutMs) {
+    const now = snapshot();
+    // 0 — звук ещё не грузился (после setContext плеер ждёт play): старого трека,
+    // которому могли бы достаться указания, тоже нет.
+    const shown = now?.durationMs ?? 0;
+    const durationMatches = durationMs <= 0 || shown === 0 || Math.abs(shown - durationMs) < 1500;
+    if (now?.trackId === trackId && now.status !== "loadingMediaSource" && durationMatches) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
 }
 
 export async function play() {
@@ -252,4 +272,15 @@ export async function pause() {
 export async function seek(ms: number) {
   const p = player();
   if (p) await asMod(() => p.setProgress(Math.max(0, ms) / 1000));
+}
+
+/**
+ * Скорость воспроизведения, 1 — обычная. Так ядро догоняет комнату без
+ * перемотки: перемотка у потокового плеера — это перебуферизация, то есть
+ * обрыв звука. Высота тона сохраняется (Chromium по умолчанию, плеер её не трогает).
+ */
+export async function setRate(rate: number) {
+  const p = player();
+  if (!p || !Number.isFinite(rate) || rate <= 0) return;
+  await asMod(() => p.setSpeed(rate));
 }

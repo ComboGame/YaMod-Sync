@@ -128,6 +128,9 @@ pub enum PlayerOp {
     Play,
     Pause,
     Seek { ms: u64 },
+    /// Play at this fraction of normal speed, pitch kept: how small drift is
+    /// closed without a seek.
+    Rate { rate: f32 },
 }
 
 #[cfg(test)]
@@ -179,6 +182,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(text, r#"{"t":"player","op":"seek","ms":9}"#);
+        let text = serde_json::to_string(&Output::Player {
+            op: PlayerOp::Rate { rate: 0.95 },
+        })
+        .unwrap();
+        assert_eq!(text, r#"{"t":"player","op":"rate","rate":0.95}"#);
         let text = serde_json::to_string(&Output::Status {
             state: SessionState::Connecting,
             error: None,

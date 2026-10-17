@@ -26,8 +26,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 use ymsync_proto::{
-    Correction, Event, PeerShare, PlaybackState, RepeatMode, RosterEntry, SyncParams, TrackRef,
-    decide, target_position_ms, trust_clock,
+    Correction, Event, NudgeParams, PeerShare, PlaybackState, RepeatMode, RosterEntry, SyncParams,
+    TrackRef, decide_with, target_position_ms, trust_clock,
 };
 
 use crate::albums;
@@ -75,6 +75,17 @@ const ANNOUNCE_MIN_GAP: Duration = Duration::from_secs(2);
 /// pause the engine would seek on every tick for ever, chasing an offset it
 /// cannot remove, and the result is continuous stuttering rather than sync.
 const SEEK_COOLDOWN: Duration = Duration::from_secs(2);
+
+/// How far into a track a player may run while the room still holds that track
+/// at its start.
+///
+/// A streaming player moves on to the next track of its queue by itself when one
+/// ends, while the room first gathers everyone's «ready». Pausing it there and
+/// starting again was the stutter heard on every track change; instead it runs
+/// on, and the speed takes the head start back once the room starts. A wait
+/// longer than this — somebody slow to load — still pauses it, so the gap stays
+/// small enough to play back.
+const BARRIER_HEAD_START_MS: i64 = 2_000;
 
 /// How long a notice stays in the snapshot.
 ///
@@ -411,6 +422,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         drift_ms: None,
         position_bias_ms: cfg.sync.position_bias_ms,
         last_seek: None,
+        rate_permille: 0,
         notice: None,
         notice_seen: None,
         notice_since: None,
@@ -876,6 +888,9 @@ struct Engine {
     position_bias_ms: i64,
     /// When the last hard seek happened, for [`SEEK_COOLDOWN`].
     last_seek: Option<std::time::Instant>,
+    /// The speed the player was last set to, as a permille difference from
+    /// normal. Only ever non-zero for a backend that [`Playback::supports_rate`].
+    rate_permille: i32,
     notice: Option<String>,
     /// The notice as of the previous publish, so a replacement restarts its life.
     notice_seen: Option<String>,
@@ -1244,6 +1259,8 @@ impl Engine {
     fn start_load(&mut self, track: &TrackRef, internal: &mpsc::UnboundedSender<Internal>) {
         self.loading = Some(track.track_id.clone());
         self.drift_ms = None;
+        // A speed picked to close a gap on the last track means nothing for this one.
+        self.set_rate(0);
 
         // Whatever was still downloading for the previous track is not wanted any
         // more — and it would otherwise compete with this load for the account's
@@ -2171,16 +2188,29 @@ impl Engine {
         // The backend may report its playhead with a constant lag; cancel it
         // rather than chase it, so drift reflects what is actually audible.
         let local_ms = self.player.position_ms() as i64 + self.position_bias_ms;
+
+        // The room holds this track at its start, but the player already began it
+        // on its own as the previous one ended: let it run, see
+        // [`BARRIER_HEAD_START_MS`].
+        let nudging = self.player.supports_rate();
+        if nudging && remote.waiting.is_some() && self.player.is_playing() && local_ms < BARRIER_HEAD_START_MS {
+            self.drift_ms = None;
+            return;
+        }
         self.drift_ms = Some(local_ms - target_ms);
 
-        match decide(
+        let nudge = NudgeParams::default();
+        match decide_with(
             target_ms,
             local_ms,
             remote.playing,
             self.player.is_playing(),
             &self.params,
+            nudging.then_some(&nudge),
         ) {
             Correction::None => {}
+            Correction::Nudge { permille } => self.set_rate(permille),
+            Correction::Play => self.player.play(),
             Correction::Pause => self.player.pause(),
             Correction::Seek { to_ms } => {
                 // A resume always seeks; a plain correction waits out the
@@ -2195,6 +2225,20 @@ impl Engine {
                 self.player.play();
             }
         }
+    }
+
+    /// Sets the player's speed, if it is not already at it. Speed differences
+    /// smaller than this are not worth a call; normal speed always is.
+    fn set_rate(&mut self, permille: i32) {
+        const STEP: i32 = 3;
+        if !self.player.supports_rate() {
+            return;
+        }
+        if permille == self.rate_permille || (permille != 0 && (permille - self.rate_permille).abs() < STEP) {
+            return;
+        }
+        self.rate_permille = permille;
+        self.player.set_rate(1.0 + permille as f32 / 1000.0);
     }
 
     fn seek_now(&mut self, to_ms: u64, failure: &str) {
