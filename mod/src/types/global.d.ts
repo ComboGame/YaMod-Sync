@@ -7,6 +7,11 @@ declare global {
       sync: {
         start: (config: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
         stop: () => Promise<{ ok: boolean }>;
+        state: () => Promise<{
+          status: { state: string; error?: string };
+          room: { room: string; relay: string; host: boolean } | null;
+        }>;
+        resume: () => Promise<{ ok: boolean }>;
         command: (command: unknown) => void;
         reportPlayer: (state: unknown) => void;
         reportLoaded: (result: unknown) => void;

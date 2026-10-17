@@ -124,6 +124,9 @@ export type SyncState = {
   room: RoomSnapshot | null;
   /** Последнее, что стоит показать: «вы поставили на паузу» и т.п. */
   activity: string | null;
+  /** Комната, в которую входили последний раз: её название и сервер. */
+  roomName: string | null;
+  server: string | null;
 };
 
 const REPORT_EVERY_MS = 200;
@@ -136,7 +139,7 @@ const SHARE_RETRY_MS = 3000;
 
 const sync = window.yandexMusicMod?.sync;
 
-let state: SyncState = { session: "stopped", error: null, room: null, activity: null };
+let state: SyncState = { session: "stopped", error: null, room: null, activity: null, roomName: null, server: null };
 const listeners = new Set<(state: SyncState) => void>();
 
 function setState(patch: Partial<SyncState>) {
@@ -189,7 +192,13 @@ export async function connect(config: SyncConfig) {
     setState({ error: "мост YandexSync недоступен в этом окне" });
     return;
   }
-  setState({ session: "connecting", error: null, activity: null });
+  setState({
+    session: "connecting",
+    error: null,
+    activity: null,
+    roomName: config.room,
+    server: config.host ? "этот компьютер" : config.relay.replace(/^wss?:\/\//, ""),
+  });
   const result = await sync.start({ ...config, yandex_token: yandexToken() });
   if (!result?.ok) {
     setState({ session: "stopped", error: result?.error ?? "не удалось запустить YandexSync" });
@@ -296,6 +305,11 @@ async function load(track: TrackRef, seq: number) {
   }
 
   try {
+    await sonata.whenPlayer(10_000, stale);
+    if (stale()) {
+      stats.superseded++;
+      return;
+    }
     const now = sonata.snapshot();
     const alreadyThere = now?.trackId === track.track_id && ours(now);
     // Плеер доигрывает предыдущий трек нашей очереди и вот-вот перейдёт сам:
@@ -448,13 +462,15 @@ type Intercept = (args: any[], room: RoomSnapshot) => "block" | "now" | void;
 /** Треки из того, что приложение передаёт в inject: метаданные, если есть, иначе id. */
 async function tracksFrom(entitiesData: any[]): Promise<TrackRef[]> {
   const metas = (entitiesData ?? []).map((item: any) => item?.meta ?? item?.data?.meta ?? item);
+  // Меню трека передаёт id как «трек:альбом», API отвечает просто id трека.
+  const idOf = (meta: any) => String(meta?.id ?? "").split(":")[0]!;
   const ready = metas.map((meta: any) => sonata.trackFromMeta(meta));
-  const missing = metas.filter((_: any, i: number) => !ready[i]).map((meta: any) => String(meta?.id ?? "")).filter(Boolean);
+  const missing = metas.filter((_: any, i: number) => !ready[i]).map(idOf).filter(Boolean);
   if (!missing.length) return ready.filter((t): t is TrackRef => t !== null);
   const info = await getTracksInfo(missing);
   const byId = new Map(info.isOk() ? info.value.map((meta: any) => [String(meta.id), sonata.trackFromMeta(meta)]) : []);
   return metas
-    .map((meta: any, i: number) => ready[i] ?? byId.get(String(meta?.id ?? "")) ?? null)
+    .map((meta: any, i: number) => ready[i] ?? byId.get(idOf(meta)) ?? null)
     .filter((t: TrackRef | null): t is TrackRef => t !== null);
 }
 
@@ -525,6 +541,13 @@ const INTERCEPTS: Record<string, Intercept> = {
     const now = sonata.snapshot();
     if (!ours(now)) return "now";
     queueFromApp(params, Number(params?.position) === (now?.index ?? -1) + 1 ? "next" : "last");
+    return "block";
+  },
+  // У комнаты нет команды «убрать из очереди», а убрать трек только у себя —
+  // значит разойтись с остальными.
+  removeAndLoadEntities: () => {
+    if (!ours(sonata.snapshot())) return "now";
+    activity("Убирать треки из очереди комнаты пока нельзя");
     return "block";
   },
   playContext: ([params], room) => {
@@ -647,6 +670,27 @@ function rememberWhatWasPlaying() {
 (window as any).__yandexSync = { connect, disconnect, command, getSyncState, snapshot: sonata.snapshot, player: sonata.player, stats };
 
 // ---- события моста ---------------------------------------------------------
+
+/*
+ * Окно перезагрузилось, а мост — нет: он по-прежнему в комнате и управляет
+ * плеером. Окно узнаёт об этом у main-процесса и продолжает с того же места,
+ * вместо того чтобы показывать «не в комнате» поверх играющей комнаты.
+ */
+void sync?.state?.().then(async ({ status, room }) => {
+  if (state.session !== "stopped" || (status.state !== "connected" && status.state !== "reconnecting")) return;
+  setState({
+    session: status.state as SessionState,
+    error: status.error ?? null,
+    roomName: room?.room ?? null,
+    server: room ? (room.host ? "этот компьютер" : room.relay.replace(/^wss?:\/\//, "")) : null,
+  });
+  startReporting();
+  void sync.resume?.();
+  // То, что плеер восстановил сам, — не выбор пользователя; но спросить плеер
+  // можно только когда документ готов.
+  if (document.readyState === "loading") await new Promise((done) => document.addEventListener("DOMContentLoaded", done, { once: true }));
+  if (status.state === "connected") rememberWhatWasPlaying();
+});
 
 sync?.onEvent((message: any) => {
   switch (message.t) {

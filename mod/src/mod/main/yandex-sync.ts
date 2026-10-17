@@ -15,6 +15,16 @@ const BRIDGE_EXE = "ymsync-bridge.exe";
 
 let bridge: ChildProcessWithoutNullStreams | null = null;
 
+/**
+ * Что мост делает сейчас, для окна, которое перезагрузилось: мост при этом
+ * остаётся в комнате и продолжает управлять плеером, а окно начинает с нуля и
+ * без этого считало бы, что вы не в комнате.
+ */
+let lastStatus: { state: string; error?: string } = { state: "stopped" };
+let lastRoom: { room: string; relay: string; host: boolean } | null = null;
+/** Последний start, как он ушёл мосту: повторить его — значит получить комнату заново. */
+let lastStart: unknown = null;
+
 /** Установленный мод держит мост в resources/assets, запуск через `electron .` — в assets/ рядом с приложением. */
 function bridgePath(): string {
   const candidates = [
@@ -51,7 +61,9 @@ function ensureBridge(): ChildProcessWithoutNullStreams {
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     if (!line.trim()) return;
     try {
-      broadcast(JSON.parse(line));
+      const message = JSON.parse(line);
+      if (message?.t === "status") lastStatus = { state: message.state, error: message.error };
+      broadcast(message);
     } catch {
       console.warn("[YandexSync] непонятная строка от моста:", line);
     }
@@ -60,6 +72,7 @@ function ensureBridge(): ChildProcessWithoutNullStreams {
 
   child.on("exit", (code, signal) => {
     if (bridge === child) bridge = null;
+    lastStatus = { state: "stopped" };
     setFullSpeed(false);
     broadcast({ t: "bridge_exit", code, signal });
   });
@@ -95,13 +108,26 @@ export function setupYandexSync() {
     }
     // Кэш ядра (сайдкары треков, «Мне нравится») — в профиле приложения.
     const dataDir = path.join(app.getPath("userData"), "ymsync");
-    send({ t: "start", config: { ...config, data_dir: dataDir } });
+    lastStart = { t: "start", config: { ...config, data_dir: dataDir } };
+    send(lastStart);
+    lastRoom = { room: String(config.room ?? ""), relay: String(config.relay ?? ""), host: config.host === true };
     setFullSpeed(true);
+    return { ok: true };
+  });
+
+  ipcMain.handle("yandexSync.state", () => ({ status: lastStatus, room: lastRoom }));
+
+  // Перезагруженное окно: тот же start ещё раз. Мост на него отвечает статусом,
+  // снапшотом и очередью и заново ставит трек в плеер (см. bridge/src/lib.rs).
+  ipcMain.handle("yandexSync.resume", () => {
+    if (!lastStart || !send(lastStart)) return { ok: false };
     return { ok: true };
   });
 
   ipcMain.handle("yandexSync.stop", () => {
     send({ t: "stop" });
+    lastRoom = null;
+    lastStart = null;
     setFullSpeed(false);
     return { ok: true };
   });

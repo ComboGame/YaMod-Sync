@@ -157,6 +157,11 @@ impl RemotePlayback {
             state.heard_since_load = false;
             Ok(())
         } else {
+            // Nothing is staged after a refusal. When the load came from
+            // [`RemotePlayback::restage`] nobody waits for this answer, and a
+            // track left "staged" but never confirmed would be staged again by
+            // nobody: the engine stages what is missing, not what looks present.
+            state.staged = None;
             Err(report
                 .error
                 .unwrap_or_else(|| "плеер Яндекс Музыки не смог поставить трек".to_string()))

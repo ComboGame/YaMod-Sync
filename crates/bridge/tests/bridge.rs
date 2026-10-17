@@ -400,6 +400,11 @@ mod sim {
         pub late_answers: bool,
     }
 
+    /// Loads the app will refuse before it takes one: a window that reloaded
+    /// and has no player yet.
+    #[derive(Clone, Default)]
+    pub struct Refusals(pub std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
     /// What the app has been through, for the assertions.
     #[derive(Default)]
     pub struct Seen {
@@ -445,6 +450,8 @@ mod sim {
 
     pub struct App {
         pub seen: Arc<Mutex<Seen>>,
+        /// How many of the next loads to refuse.
+        pub refuse: Refusals,
         control: mpsc::UnboundedSender<Control>,
         task: JoinHandle<()>,
     }
@@ -452,9 +459,11 @@ mod sim {
     impl App {
         pub fn start(mut bridge: Mod, options: Options) -> Self {
             let seen = Arc::new(Mutex::new(Seen::default()));
+            let refuse = Refusals::default();
             let (control, mut control_rx) = mpsc::unbounded_channel::<Control>();
             let task = {
                 let seen = Arc::clone(&seen);
+                let refuse = refuse.clone();
                 tokio::spawn(async move {
                     let mut player = Player {
                         rate: 1.0,
@@ -514,6 +523,12 @@ mod sim {
                             control = control_rx.recv() => match control {
                                 None => return,
                                 Some(Control::Send(value)) => bridge.send(value).await,
+                                Some(Control::JumpTo(id)) if id.is_empty() => {
+                                    // A reloaded window: no player, nothing on it.
+                                    player.track = None;
+                                    player.position = 0.0;
+                                    player.playing = false;
+                                }
                                 Some(Control::JumpTo(id)) => {
                                     player.track = Some(id);
                                     player.position = 0.0;
@@ -552,6 +567,14 @@ mod sim {
                                     }
                                 });
                                 for (_, id, which) in due {
+                                    let refusing = refuse.0.load(std::sync::atomic::Ordering::SeqCst);
+                                    if refusing > 0 {
+                                        refuse.0.store(refusing - 1, std::sync::atomic::Ordering::SeqCst);
+                                        bridge
+                                            .send(json!({"t": "loaded", "result": {"track_id": id, "ok": false, "error": "плеер ещё не готов"}}))
+                                            .await;
+                                        continue;
+                                    }
                                     if which == loads {
                                         if player.track.as_deref() != Some(id.as_str()) {
                                             player.track = Some(id.clone());
@@ -575,7 +598,7 @@ mod sim {
                     }
                 })
             };
-            Self { seen, control, task }
+            Self { seen, refuse, control, task }
         }
 
         pub fn send(&self, value: Value) {
@@ -1180,4 +1203,46 @@ async fn a_wave_runs_from_one_session_and_hears_what_the_room_did() {
     for dir in [dir, friend_dir] {
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// A window that reloaded while in a room asks for it again and is handed the
+/// track — but its player is not up yet and refuses. That used to leave the
+/// track "staged" and never confirmed: nothing staged it again, and the room
+/// played on in silence there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_track_a_reloaded_window_refused_is_staged_again() {
+    let mut relay = ymsync_relay::bind("127.0.0.1:0", TOKEN).await.expect("relay");
+    let url = format!("ws://{}", relay.local_addr());
+    let (a, dir) = join(
+        &url,
+        "reloaded",
+        sim::Options {
+            load_delay_ms: 100,
+            ..Default::default()
+        },
+    )
+    .await;
+    a.command(queue_of(&[track_of("x1", 120_000), track_of("x2", 120_000)]));
+    a.until("playing x1", 10_000, |seen| {
+        seen.snapshot["local_track"] == "x1" && seen.snapshot["playing"] == true
+    })
+    .await;
+
+    // The reload: the window has lost its player, asks for the same room, and
+    // refuses the first track it is handed.
+    a.refuse.0.store(1, std::sync::atomic::Ordering::SeqCst);
+    a.jump_to("");
+    a.until("the player empty", 2_000, |seen| seen.snapshot["local_track"].is_null()).await;
+    let reloaded = std::time::Instant::now();
+    a.send(start_config(&url, "reloaded", &dir));
+    a.until("x1 playing again", 8_000, |seen| {
+        seen.snapshot["local_track"] == "x1" && seen.snapshot["playing"] == true
+    })
+    .await;
+    let loads = a.ops_since(reloaded, &["load"]);
+    assert!(loads.len() >= 2, "staged once more after the refusal: {loads:?}");
+
+    a.stop();
+    relay.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
 }

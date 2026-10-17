@@ -3,6 +3,7 @@ import { connect, hasYandexToken, type SyncConfig } from "./controller";
 import { player } from "./sonata";
 
 export * from "./controller";
+export { crossfadeEnabled } from "./sonata";
 
 export const SYNC_DEFAULTS: SyncConfig = {
   relay: "",

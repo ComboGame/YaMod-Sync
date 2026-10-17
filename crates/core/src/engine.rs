@@ -98,6 +98,10 @@ const RESTAGE_GAP: Duration = Duration::from_secs(2);
 const RESTAGE_SLOW_GAP: Duration = Duration::from_secs(10);
 const RESTAGE_QUICK_TRIES: u8 = 3;
 
+/// How often the room's track is staged again when the player holds nothing of
+/// it and nothing is on its way; see [`Engine::ensure_staged`].
+const ENSURE_GAP: Duration = Duration::from_secs(2);
+
 /// How long a notice stays in the snapshot.
 ///
 /// Notices report events — a peer joining, a track skipped. Without an expiry
@@ -493,6 +497,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         last_seek: None,
         rate_permille: 0,
         restaged: None,
+        last_ensure: None,
         latency: Latency::default(),
         asked_at: None,
         load_started: None,
@@ -975,6 +980,8 @@ struct Engine {
     /// The track last staged again because the player had left it, when, and
     /// how many times in a row. See [`Engine::recover_track`].
     restaged: Option<(String, std::time::Instant, u8)>,
+    /// When [`Engine::ensure_staged`] last had to stage the room's track.
+    last_ensure: Option<std::time::Instant>,
     latency: Latency,
     /// When the oldest request the relay has not answered yet went out.
     asked_at: Option<std::time::Instant>,
@@ -2193,7 +2200,41 @@ impl Engine {
         // matters more than filling the offline library.
         self.pump_downloads(internal);
         self.report_ready();
+        self.ensure_staged(internal);
         self.correct(internal);
+    }
+
+    /// Stages the room's track when the player holds nothing of it and nothing
+    /// is on its way.
+    ///
+    /// A track is normally staged when the room names it. This catches the
+    /// load that failed with nobody waiting on it: a window that reloaded is
+    /// handed its track again by the bridge, and if the app's player was not
+    /// up yet the track was refused — and then nothing ever staged it, so the
+    /// room played on in silence there.
+    fn ensure_staged(&mut self, internal: &mpsc::UnboundedSender<Internal>) {
+        if self.loading.is_some() {
+            return;
+        }
+        let Some(track) = self.wanted_track() else {
+            return;
+        };
+        let id = track.track_id.as_str();
+        if self.player.current_track_id().as_deref() == Some(id)
+            || self.unavailable.contains(id)
+            || self.set_aside(id)
+            // A retry of a failed load is already on its way.
+            || self.attempts.contains_key(id)
+        {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.last_ensure.is_some_and(|at| now.duration_since(at) < ENSURE_GAP) {
+            return;
+        }
+        self.last_ensure = Some(now);
+        debug!(track = %id, "the player holds nothing of the room's track; staging it");
+        self.start_load(&track, internal);
     }
 
     /// Tells the relay this peer can start the track the room is holding.

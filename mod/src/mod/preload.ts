@@ -19,6 +19,8 @@ if (window === window.top && window.location.protocol === "music-application:") 
     sync: {
       start: (config: unknown) => electron.ipcRenderer.invoke("yandexSync.start", config),
       stop: () => electron.ipcRenderer.invoke("yandexSync.stop"),
+      state: () => electron.ipcRenderer.invoke("yandexSync.state"),
+      resume: () => electron.ipcRenderer.invoke("yandexSync.resume"),
       command: (command: unknown) => electron.ipcRenderer.send("yandexSync.command", command),
       reportPlayer: (state: unknown) => electron.ipcRenderer.send("yandexSync.player", state),
       reportLoaded: (result: unknown) => electron.ipcRenderer.send("yandexSync.loaded", result),

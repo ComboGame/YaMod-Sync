@@ -90,7 +90,8 @@ export function isModCall() {
 }
 
 function rootFiber(): any {
-  const el = document.querySelector('section[data-test-id="PLAYERBAR_DESKTOP"]') ?? document.body.firstElementChild;
+  // Скрипт мода выполняется раньше, чем появляется body.
+  const el = document.querySelector('section[data-test-id="PLAYERBAR_DESKTOP"]') ?? document.body?.firstElementChild;
   if (!el) return null;
   const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
   if (!key) return null;
@@ -142,6 +143,19 @@ export function player(): any {
     if (fiber.sibling) stack.push(fiber.sibling);
   }
   return null;
+}
+
+/**
+ * Ждёт, пока приложение отрисует плеер. Сразу после запуска или перезагрузки
+ * окна его ещё нет, а мост уже просит поставить трек комнаты.
+ */
+export async function whenPlayer(timeoutMs = 10_000, cancelled: () => boolean = () => false): Promise<boolean> {
+  const started = performance.now();
+  while (!player()) {
+    if (cancelled() || performance.now() - started > timeoutMs) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return true;
 }
 
 export function snapshot(): PlayerSnapshot | null {
@@ -348,4 +362,17 @@ export async function setRate(rate: number) {
   const p = player();
   if (!p || !Number.isFinite(rate) || rate <= 0) return;
   await asMod(() => p.setSpeed(rate));
+}
+
+/**
+ * Включены ли в приложении «Плавные переходы между треками». С ними плеер
+ * начинает следующий трек за несколько секунд до конца текущего, раньше
+ * комнаты, — синхрон на переходе это сбивает.
+ */
+export function crossfadeEnabled(): boolean {
+  try {
+    return JSON.parse(localStorage.crossFadeMode ?? "{}").value === true;
+  } catch {
+    return false;
+  }
 }
