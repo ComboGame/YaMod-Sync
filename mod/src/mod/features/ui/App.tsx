@@ -13,6 +13,8 @@ import { RoomDock } from "@ui/shell/room-dock";
 import { SettingsModal } from "@ui/shell/settings";
 import { dockOpen, loadShell, openSettings, setShell, useShell, wideWindow } from "@ui/shell/shell-state";
 import { TopBar } from "@ui/shell/top-bar";
+import { markRoom } from "@ui/client-tweaks";
+import { parseStation, waveOwner } from "~/mod/features/yandex-sync";
 
 import logo from "@ui/assets/logo.png?inline";
 
@@ -118,7 +120,23 @@ function Dock({ overlay }: { overlay: boolean }) {
   );
 }
 
+/** Что клиенту знать о комнате для своих правок (client-tweaks.ts). */
+function useRoomMarks() {
+  const sync = useSync();
+  const room = sync.room;
+  const inRoom = !!room && (sync.session === "connected" || sync.session === "reconnecting");
+  const guestOf = inRoom ? waveOwner(room) : null;
+  const wave = inRoom ? parseStation(room!.station) : null;
+  const label = !inRoom
+    ? null
+    : wave
+      ? `Волна комнаты: ${wave.name ?? "Моя волна"}${guestOf ? ` · режим выбирает ${guestOf}` : ""}`
+      : "Играет очередь комнаты";
+  useEffect(() => markRoom({ inRoom, guestOf, label }), [inRoom, guestOf, label]);
+}
+
 export default function App() {
+  useRoomMarks();
   const shell = useShell();
   const slot = useNavbarSlot();
   const wide = useWideWindow();

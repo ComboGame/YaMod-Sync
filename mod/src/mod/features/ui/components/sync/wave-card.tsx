@@ -60,7 +60,7 @@ export function WaveCard({ room }: { room: RoomSnapshot }) {
         </Button>
       ) : (
         <p className="text-muted-foreground mt-3 text-[13px] leading-snug">
-          Выключить её может тот, кто включил. Ваша волна или пресет из приложения заменят эту.
+          Режим и очередь волны меняет {wave.by ?? "тот, кто её включил"}. Пауза, перемотка и пропуск — общие.
         </p>
       )}
     </Card>

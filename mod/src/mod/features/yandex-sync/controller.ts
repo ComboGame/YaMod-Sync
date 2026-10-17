@@ -20,6 +20,7 @@ import * as sonata from "./sonata";
 import type { TrackRef } from "./sonata";
 import { getTracksInfo } from "~/mod/features/utils/yandex-api";
 import { onYandexApiRequest } from "~/mod/features/utils";
+import { toast } from "sonner";
 
 export type SessionState = "stopped" | "connecting" | "connected" | "reconnecting";
 
@@ -569,6 +570,27 @@ const INTERCEPTS: Record<string, Intercept> = {
   },
 };
 
+/**
+ * Волну комнаты ведёт другой участник, и он здесь: её очередь и режим — его.
+ * Пауза, перемотка и пропуск остаются общими (ядро и релей проверяют то же).
+ */
+export function waveOwner(room: RoomSnapshot | null): string | null {
+  if (!room?.station || room.station_unfed || room.feeding) return null;
+  return parseStation(room.station)?.by ?? "другой участник";
+}
+
+/** Действия, которые меняют очередь или режим волны, — не для гостя чужой волны. */
+const OWNER_ONLY = new Set(["playContext", "setEntityByIndex", "injectNext", "injectLast", "inject"]);
+
+let lastRefusal = 0;
+function refuseGuest(owner: string) {
+  const text = `Волну ведёт ${owner}: режим и очередь меняет только он`;
+  activity(text);
+  // Одно нажатие может вызвать несколько методов плеера подряд.
+  if (Date.now() - lastRefusal > 1500) toast(text);
+  lastRefusal = Date.now();
+}
+
 function sameSeeds(a: string[], b: string[]) {
   const norm = (seeds: string[]) => (seeds.length ? seeds : ["user:onyourwave"]).map((s) => s.trim()).join("|");
   return norm(a) === norm(b);
@@ -582,7 +604,16 @@ function installInterceptors(facade: any) {
     if (typeof original !== "function") continue;
     facade[name] = function (this: any, ...args: any[]) {
       const otherPlayback = args[PLAYBACK_ARG[name]!] !== undefined;
-      if (sonata.isModCall() || otherPlayback || !inRoom()) return original.apply(this, args);
+      if (sonata.isModCall() || !inRoom()) return original.apply(this, args);
+      // Волна и её режимы на главной — тоже «другой плеер» по этому аргументу,
+      // но в комнате это выбор режима волны: его не пропускаем мимо.
+      const vibe = name === "playContext" && args[0]?.contextData?.type === "vibe";
+      if (otherPlayback && !vibe) return original.apply(this, args);
+      const owner = OWNER_ONLY.has(name) ? waveOwner(state.room) : null;
+      if (owner && (name === "playContext" || ours(sonata.snapshot()))) {
+        refuseGuest(owner);
+        return Promise.resolve();
+      }
       const verdict = intercept(args, state.room!);
       if (verdict === "block") return Promise.resolve();
       if (verdict !== "now") hold();

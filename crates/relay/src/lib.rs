@@ -733,6 +733,27 @@ impl RoomState {
     /// Applies one peer's command. `Err` carries an error code for that peer;
     /// the room is left untouched in that case.
     fn apply(&mut self, command: Command, from: u64, now: i64) -> Result<Changed, &'static str> {
+        // A wave fed by a peer who is still here belongs to them: its queue and
+        // its mode are what their account picks for the room. Others keep
+        // pause, seek and skip, but cannot replace or reshape the queue. A
+        // wave whose feeder left is free, as it always was.
+        let reshapes_queue = matches!(
+            command,
+            Command::SetQueue { .. }
+                | Command::Enqueue { .. }
+                | Command::PlayNext { .. }
+                | Command::PlayIndex { .. }
+                | Command::SetShuffle { .. }
+        );
+        // Claiming the wave itself is refused further down, as `station_taken`.
+        if reshapes_queue
+            && self
+                .station
+                .as_ref()
+                .is_some_and(|(_, owner)| owner.is_some_and(|owner| owner != from))
+        {
+            return Err("station_owned");
+        }
         let changed = match command {
             Command::SetQueue { tracks, start } => {
                 if tracks.is_empty() {
@@ -1017,6 +1038,7 @@ fn error_message(code: &str) -> &'static str {
         "no_such_index" => "в очереди нет такого номера",
         "end_of_queue" => "это последний трек в очереди",
         "station_taken" => "волну в этой комнате уже ведёт другой участник",
+        "station_owned" => "волну ведёт другой участник: менять очередь и режим может только он",
         "too_many_shares" => "слишком много треков в одном объявлении о раздаче",
         _ => "команда отклонена",
     }
@@ -1674,6 +1696,35 @@ mod tests {
         assert_eq!(state.index, 0);
         assert_eq!(state.snapshot().waiting, None);
         assert_eq!(state.at_server_ms, ended + NATURAL_GAP_MS);
+    }
+
+    /// The queue of a wave somebody is feeding is theirs while they are here.
+    #[test]
+    fn only_the_feeder_reshapes_the_queue_of_a_wave() {
+        let mut state = room_with_two_tracks(0);
+        state.apply(Command::SetStation { id: Some("{\"seeds\":[\"genre:rnb\"]}".into()) }, 1, 0).unwrap();
+        for command in [
+            Command::SetQueue { tracks: vec![track("x", 1_000)], start: 0 },
+            Command::Enqueue { tracks: vec![track("x", 1_000)] },
+            Command::PlayNext { tracks: vec![track("x", 1_000)] },
+            Command::PlayIndex { index: 1 },
+            Command::SetShuffle { on: true },
+        ] {
+            assert_eq!(state.apply(command, 2, 1_000), Err("station_owned"));
+        }
+        assert_eq!(ids(&state), ["1", "2"]);
+        assert_eq!(state.apply(Command::SetStation { id: Some("genre:rock".into()) }, 2, 1_000), Err("station_taken"));
+        // Playback is everybody's.
+        assert!(state.apply(Command::Pause, 2, 1_000).is_ok());
+        assert!(state.apply(Command::Next, 2, 1_100).is_ok());
+        // The feeder may.
+        assert!(state.apply(Command::Enqueue { tracks: vec![track("3", 1_000)] }, 1, 1_200).is_ok());
+        // Once the feeder has gone, the wave is anybody's.
+        state.peer_left(1, 2_000);
+        if let Some((_, owner)) = state.station.as_mut() {
+            *owner = None;
+        }
+        assert!(state.apply(Command::PlayIndex { index: 0 }, 2, 2_100).is_ok());
     }
 
     #[test]

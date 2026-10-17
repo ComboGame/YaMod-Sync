@@ -1020,6 +1020,11 @@ mod fake_yandex {
 
     /// Tracks of `ms` each, numbered on from batch to batch.
     pub async fn start(track_ms: u64) -> Server {
+        start_slow(track_ms, 0).await
+    }
+
+    /// The same, answering the wave's requests for tracks only after `delay_ms`.
+    pub async fn start_slow(track_ms: u64, delay_ms: u64) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1098,6 +1103,9 @@ mod fake_yandex {
                             } else {
                                 ("404 Not Found", json!({"error": "not here"}))
                             };
+                            if path.starts_with("/rotor/session/") && !path.ends_with("/feedback") {
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            }
                             let text = answer.to_string();
                             let reply = format!(
                                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{text}",
@@ -1243,6 +1251,127 @@ async fn a_track_a_reloaded_window_refused_is_staged_again() {
     assert!(loads.len() >= 2, "staged once more after the refusal: {loads:?}");
 
     a.stop();
+    relay.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Picking another preset while the previous wave is still asking Yandex for
+/// its tracks. The old wave's answer arrives first and must be dropped: taking
+/// it for the new wave replaced everyone's queue with the old wave's tracks,
+/// then appended the new ones — the wrong mode and twice the wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_preset_picked_while_the_last_wave_is_loading_plays_alone() {
+    let mut relay = ymsync_relay::bind("127.0.0.1:0", TOKEN).await.expect("relay");
+    let url = format!("ws://{}", relay.local_addr());
+    let yandex = fake_yandex::start_slow(60_000, 1_200).await;
+
+    let dir = temp_dir("wave-switch");
+    let app = sim::App::start(start_bridge(), sim::Options { load_delay_ms: 100, ..Default::default() });
+    let mut config = start_config(&url, "волна", &dir);
+    config["config"]["yandex_token"] = json!("test-token");
+    config["config"]["api_base"] = json!(yandex.base);
+    app.send(config);
+    app.until("connected", 20_000, |seen| seen.statuses.iter().any(|s| s == "connected")).await;
+
+    // The first preset's session is still being opened when the second is picked.
+    app.command(json!({"c": "wave", "seeds": ["genre:rock"]}));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    app.command(json!({"c": "wave", "seeds": ["genre:rnb"]}));
+
+    app.until("the second preset playing", 10_000, |seen| {
+        seen.snapshot["feeding"] == true && seen.snapshot["track"]["track_id"].as_str().is_some()
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+
+    // The first answer was v1–v3 and belongs to the rock wave; the rnb wave's
+    // first batch is v4–v6. Nothing of the first may have reached the room.
+    let snapshot = app.snapshot();
+    assert_eq!(snapshot["track"]["track_id"], "v4", "{snapshot}");
+    assert!(snapshot["station"].as_str().unwrap_or_default().contains("genre:rnb"), "{snapshot}");
+    let new_sessions = yandex
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.path == "/rotor/session/new")
+        .map(|r| r.body["seeds"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(new_sessions, [json!(["genre:rock"]), json!(["genre:rnb"])]);
+
+    app.stop();
+    relay.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Somebody else feeds the room's wave and is still here. Its queue and mode
+/// are theirs: this listener cannot start another preset, an album, a track
+/// up front or another track of the queue — but can still pause it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listener_cannot_reshape_a_wave_somebody_else_feeds() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let mut relay = ymsync_relay::bind("127.0.0.1:0", TOKEN).await.expect("relay");
+    let url = format!("ws://{}", relay.local_addr());
+    let (guest, dir) = join(
+        &url,
+        "гость",
+        sim::Options {
+            load_delay_ms: 100,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The feeder: a queue, the wave claimed, and it stays.
+    let (mut feeder, _) = tokio_tungstenite::connect_async(&url).await.expect("feeder");
+    let send = |value: Value| Message::text(value.to_string());
+    feeder
+        .send(send(json!({"t": "hello", "protocol": 6, "room": "test", "token": TOKEN, "client": "test", "name": "laider"})))
+        .await
+        .unwrap();
+    feeder
+        .send(send(json!({"t": "do", "command": {"c": "set_queue", "start": 0, "tracks": [track_of("w1", 120_000), track_of("w2", 120_000)]}})))
+        .await
+        .unwrap();
+    let station = r#"{"seeds":["user:onyourwave"],"name":"Моя волна","by":"laider"}"#;
+    feeder
+        .send(send(json!({"t": "do", "command": {"c": "set_station", "id": station}})))
+        .await
+        .unwrap();
+    guest
+        .until("the feeder's wave", 10_000, |seen| {
+            seen.snapshot["station"].as_str().is_some_and(|s| s.contains("laider")) && seen.snapshot["room_playing"] == true
+        })
+        .await;
+    let queues = guest.seen.lock().unwrap().queues;
+
+    for command in [
+        json!({"c": "wave", "seeds": ["genre:rnb"]}),
+        json!({"c": "set_queue", "start": 0, "tracks": [track_of("mine", 120_000)]}),
+        json!({"c": "play_next", "tracks": [track_of("mine", 120_000)]}),
+        json!({"c": "index", "index": 1}),
+    ] {
+        guest.command(command);
+    }
+    guest
+        .until("told why", 3_000, |seen| {
+            seen.snapshot["notice"].as_str().is_some_and(|n| n.contains("волну ведёт laider"))
+        })
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let snapshot = guest.snapshot();
+    assert_eq!(guest.seen.lock().unwrap().queues, queues, "the queue changed: {snapshot}");
+    assert_eq!(snapshot["track"]["track_id"], "w1", "{snapshot}");
+    assert_eq!(snapshot["feeding"], false);
+
+    // Playback stays everybody's.
+    guest.command(json!({"c": "toggle"}));
+    guest.until("paused for all", 3_000, |seen| seen.snapshot["room_playing"] == false).await;
+
+    feeder.close(None).await.unwrap();
+    guest.stop();
     relay.stop().await;
     let _ = std::fs::remove_dir_all(dir);
 }

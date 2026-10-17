@@ -469,6 +469,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         revision: 0,
         station: None,
         refilling: false,
+        station_generation: 0,
         remote: None,
         unavailable: HashSet::new(),
         deferred: HashMap::new(),
@@ -551,6 +552,8 @@ enum Internal {
     },
     /// What a station handed out, or why it handed out nothing.
     Station {
+        /// Which station asked; see [`Station::generation`].
+        generation: u64,
         tracks: Vec<TrackRef>,
         error: Option<String>,
         /// The wave session the batch came from; `None` from the old endpoint.
@@ -644,11 +647,18 @@ struct Station {
     replace_first: bool,
     /// The wave session this peer is feeding from. See [`WaveSession`].
     wave: WaveSession,
+    /// Tells this station apart from the one it replaced. A batch asked for by
+    /// the previous wave can arrive after another preset was picked, and taking
+    /// it for the new wave replaced everyone's queue with the old wave's tracks
+    /// before the new ones were appended — the "wrong mode, twice the wait"
+    /// heard on every quick switch.
+    generation: u64,
 }
 
 impl Station {
-    fn new(id: String, replace_first: bool) -> Self {
+    fn new(id: String, replace_first: bool, generation: u64) -> Self {
         Self {
+            generation,
             id,
             after: None,
             claimed: false,
@@ -916,6 +926,8 @@ struct Engine {
     station: Option<Station>,
     /// A request for more station tracks is in flight.
     refilling: bool,
+    /// Counts the stations started here; see [`Station::generation`].
+    station_generation: u64,
 
     /// The room's state, as the relay last described it. This is the only
     /// authority on what should be playing.
@@ -1074,7 +1086,36 @@ impl Engine {
         Some(target_position_ms(remote, now))
     }
 
+    /// Who leads the room's wave, when that is somebody else who is still here.
+    ///
+    /// While they do, the queue and the wave's mode are theirs: a preset picked
+    /// here, an album started here or a track put in front would replace or
+    /// reshuffle what their account picks for everyone. Playback itself — pause,
+    /// seek, skip — stays everybody's. A wave whose feeder left is anybody's.
+    fn wave_led_by_another(&self) -> Option<String> {
+        let remote = self.remote.as_ref()?;
+        let station = remote.station.as_ref()?;
+        if remote.station_unfed || self.station.is_some() {
+            return None;
+        }
+        Some(StationSpec::parse(station).by.unwrap_or_else(|| "другой участник".to_string()))
+    }
+
     fn handle_command(&mut self, command: Command, internal: &mpsc::UnboundedSender<Internal>) {
+        let changes_the_queue = matches!(
+            command,
+            Command::SetQueue { .. }
+                | Command::Enqueue { .. }
+                | Command::PlayNext { .. }
+                | Command::PlayIndex(_)
+                | Command::SetShuffle(_)
+                | Command::PlayStation { .. }
+                | Command::PlayWave { .. }
+        );
+        if changes_the_queue && let Some(by) = self.wave_led_by_another() {
+            self.notice = Some(format!("волну ведёт {by}: менять очередь и режим волны может только он"));
+            return;
+        }
         match command {
             Command::SetQueue { tracks, start } => {
                 if tracks.is_empty() {
@@ -1097,7 +1138,8 @@ impl Engine {
 
             Command::PlayStation { id, replace } => {
                 self.notice = Some("настраиваю волну…".to_string());
-                self.station = Some(Station::new(id, replace));
+                self.station_generation += 1;
+                self.station = Some(Station::new(id, replace, self.station_generation));
                 self.refilling = false;
                 self.request_station_tracks(internal);
             }
@@ -1353,6 +1395,7 @@ impl Engine {
         self.refilling = true;
 
         let internal = internal.clone();
+        let generation = station.generation;
         let id = station.id.clone();
         let after = station.after.clone();
         let session = station.wave.id.clone();
@@ -1362,6 +1405,7 @@ impl Engine {
         tokio::spawn(async move {
             let message = match station_batch(&api, &id, session, legacy, after, played).await {
                 Ok(batch) => Internal::Station {
+                    generation,
                     tracks: batch.tracks.iter().map(Track::to_track_ref).collect(),
                     error: None,
                     session: batch.session,
@@ -1372,6 +1416,7 @@ impl Engine {
                     description: batch.description,
                 },
                 Err(err) => Internal::Station {
+                    generation,
                     tracks: Vec::new(),
                     error: Some(format!("{err:#}")),
                     session: None,
@@ -1688,6 +1733,7 @@ impl Engine {
     fn handle_internal(&mut self, message: Internal, internal: &mpsc::UnboundedSender<Internal>) {
         match message {
             Internal::Station {
+                generation,
                 tracks,
                 error,
                 session,
@@ -1697,11 +1743,14 @@ impl Engine {
                 name,
                 description,
             } => {
-                self.refilling = false;
-                // The wave was switched off while the request was out.
-                let Some(station) = self.station.as_mut() else {
+                // The wave was switched off, or replaced by another, while the
+                // request was out. The new wave's own request may still be on
+                // its way, so this answer leaves the request flag alone.
+                let Some(station) = self.station.as_mut().filter(|s| s.generation == generation) else {
+                    debug!(generation, "a batch for a wave that is no longer playing; dropped");
                     return;
                 };
+                self.refilling = false;
                 if let Some(error) = error {
                     // Retrying on a tick would hammer a broken endpoint four
                     // times a second, so the station stops here.
