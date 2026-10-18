@@ -11,11 +11,13 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.combogame.yamodsync.auth.LoginScreen
 import ru.combogame.yamodsync.auth.LoginState
+import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
 
 class MainActivity : ComponentActivity() {
@@ -51,22 +53,41 @@ class MainActivity : ComponentActivity() {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                     }
                     is LoginState.SignedOut -> LoginScreen(reason = state.reason, onToken = model::signIn)
-                    is LoginState.SignedIn -> SignedInPlaceholder(model, state)
+                    is LoginState.SignedIn -> SignedIn(model)
                 }
             }
         }
     }
 }
 
-/** Временно, до оболочки с вкладками (задача 10). */
+/** Что на экране поверх вкладок. Полный плеер и настройки — свои экраны, «назад» возвращает к вкладкам. */
+enum class Screen { Shell, Player, Settings }
+
 @androidx.compose.runtime.Composable
-private fun SignedInPlaceholder(model: AppModel, state: LoginState.SignedIn) {
+private fun SignedIn(model: AppModel) {
+    var screen by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(Screen.Shell) }
     val snapshot by model.session.snapshot.collectAsStateWithLifecycle()
+    val room by model.room.collectAsStateWithLifecycle()
+    val login by model.login.collectAsStateWithLifecycle()
+    androidx.activity.compose.BackHandler(enabled = screen != Screen.Shell) { screen = Screen.Shell }
+    when (screen) {
+        Screen.Shell -> AppShell(
+            snapshot = snapshot,
+            roomName = room?.room,
+            account = (login as? LoginState.SignedIn)?.name?.ifBlank { null } ?: "Я",
+            onCommand = model.session::command,
+            onOpenPlayer = { screen = Screen.Player },
+            onOpenSettings = { screen = Screen.Settings },
+        ) { tab, _ -> Placeholder(tab.title) }
+        Screen.Player -> Placeholder("Плеер")
+        Screen.Settings -> Placeholder("Настройки")
+    }
+}
+
+/** Временно, пока у вкладки нет своего экрана (задачи 11–15). */
+@androidx.compose.runtime.Composable
+private fun Placeholder(title: String) {
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
-        Text(
-            "Вы вошли: ${state.name.ifEmpty { "аккаунт" }}, Плюс: ${state.plus}. Ядро: ${snapshot?.status ?: "…"}",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
+        Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
     }
 }
