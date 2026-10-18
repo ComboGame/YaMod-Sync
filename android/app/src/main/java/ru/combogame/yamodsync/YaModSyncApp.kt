@@ -10,11 +10,12 @@ import ru.combogame.yamodsync.core.JniNative
 /** Одна сессия ядра на процесс: её делят экраны и служба воспроизведения. */
 class YaModSyncApp : Application() {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    lateinit var session: CoreSession
+    lateinit var model: AppModel
         private set
 
     override fun onCreate() {
         super.onCreate()
-        session = CoreSession(JniNative(this), scope, Dispatchers.IO)
+        val native = JniNative(this)
+        model = AppModel(this, native, CoreSession(native, scope, Dispatchers.IO), scope)
     }
 }
