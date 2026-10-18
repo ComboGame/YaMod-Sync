@@ -39,9 +39,29 @@ import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
 class ShowcaseActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Тема всегда тёмная: значки системных панелей — светлые, при любом фоне.
+        enableEdgeToEdge(
+            statusBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         val screen = intent.getStringExtra("screen") ?: "home"
-        setContent { YaModSyncTheme { if (screen == "room-live") LiveRoom() else Showcase(screen) } }
+        setContent {
+            var settings by remember { mutableStateOf(AppSettings(relay = "ws://10.0.2.2:8799", room = "дом", name = "Рома")) }
+            YaModSyncTheme(background = androidx.compose.ui.graphics.Color(settings.theme.background), accent = androidx.compose.ui.graphics.Color(settings.accent.color)) {
+                when (screen) {
+                    "room-live" -> LiveRoom()
+                    "settings" -> ru.combogame.yamodsync.ui.settings.SettingsScreen(
+                        settings = settings,
+                        login = ru.combogame.yamodsync.auth.LoginState.SignedIn("roma", "Рома", plus = true),
+                        version = "0.1.0",
+                        onChange = { settings = it(settings) },
+                        onSignOut = {},
+                        onClose = {},
+                    ) { Text("Обновлений нет", color = MaterialTheme.colorScheme.onBackground) }
+                    else -> Showcase(screen)
+                }
+            }
+        }
     }
 }
 

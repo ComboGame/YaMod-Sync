@@ -21,6 +21,8 @@ import ru.combogame.yamodsync.ui.collection.CollectionScreen
 import ru.combogame.yamodsync.ui.home.HomeScreen
 import ru.combogame.yamodsync.ui.player.FullPlayer
 import ru.combogame.yamodsync.ui.room.RoomScreen
+import ru.combogame.yamodsync.ui.settings.SettingsScreen
+import androidx.compose.ui.graphics.Color
 import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.shell.Tab
 import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
@@ -44,14 +46,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Тема всегда тёмная: значки системных панелей — светлые, при любом фоне.
+        enableEdgeToEdge(
+            statusBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {}
                 .launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
         val model = (application as YaModSyncApp).model
         setContent {
-            YaModSyncTheme {
+            val settings by model.settings.collectAsStateWithLifecycle()
+            YaModSyncTheme(background = Color(settings.theme.background), accent = Color(settings.accent.color)) {
                 val login by model.login.collectAsStateWithLifecycle()
                 when (val state = login) {
                     LoginState.Checking -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
@@ -121,14 +128,27 @@ private fun SignedIn(model: AppModel) {
             loadLyrics = { model.session.lyrics(it).getOrNull() },
             onClose = { screen = Screen.Shell },
         )
-        Screen.Settings -> Placeholder("Настройки")
+        Screen.Settings -> SettingsScreen(
+            settings = settings,
+            login = login,
+            version = appVersion(),
+            onChange = model::updateSettings,
+            onSignOut = {
+                screen = Screen.Shell
+                model.signOut()
+            },
+            onClose = { screen = Screen.Shell },
+        ) {
+            Text("Проверка обновлений появится в следующей версии", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground)
+        }
     }
 }
 
-/** Временно, пока у вкладки нет своего экрана (задачи 11–15). */
+/** Версия из манифеста (`versionName`), как её видит система. */
 @androidx.compose.runtime.Composable
-private fun Placeholder(title: String) {
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
-        Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+private fun appVersion(): String {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    return androidx.compose.runtime.remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull().orEmpty()
     }
 }
