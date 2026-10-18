@@ -20,6 +20,8 @@ crates/
             движок (engine.rs), сессия (session.rs), Playback-трейт (playback.rs)
   bridge/   ymsync-bridge.exe: ядро для плеера в другом процессе; RemotePlayback (remote.rs),
             протокол со строками JSON по stdio (protocol.rs), супервизор сессии (lib.rs)
+  android/  ymsync-android (cdylib): JNI для телефона (ffi.rs), сессия с супервизором и своей комнатой (session.rs)
+android/                       приложение для Android (Kotlin, Compose, Media3), docs/android.md
 mod/
   src/patcher/                 скачивание сборки Яндекса, правки index.js/preload.js/HTML, упаковка
   src/mod/main.ts, main/       main-процесс: настройки (storage), блок аналитики, Discord RPC,
@@ -35,6 +37,7 @@ mod/
 deploy/, Dockerfile, docker-compose.yml, docs/server.md   развёртывание релея
 .github/workflows/ci.yml       Rust-тесты + Docker-образ релея (Linux)
 .github/workflows/release.yml  установщик на Windows, релиз mod-v<mod/VERSION>
+.github/workflows/android-release.yml  APK, релиз android-v<versionName> (только push в main, не «latest»)
 ```
 
 ## Команды
@@ -72,6 +75,53 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
   ответов релея, отправленный фидбек волны). Переход по разделам из CDP — `window.next.router.push(url)`
   (кроме `/landing`: там перезагрузка), меню профиля — iframe Яндекс ID (отдельная CDP-цель).
 - `PRETTIFY=true` — прогнать prettier по пропатченной сборке (медленно).
+
+Android (`android/`, `crates/android/`; план — `docs/superpowers/plans/2026-10-18-android-app.md`):
+- SDK — `%LOCALAPPDATA%\Android\Sdk` (`ANDROID_HOME`), NDK 30.0.16248370 (`ANDROID_NDK_HOME`), платформы 36 и 37.0,
+  build-tools 37.0.0, AVD `ymsync-test` (Android 16, x86_64). Пакеты ставит `cmdline-tools\latest\bin\android.exe sdk
+  install <пакет>` (`sdkmanager` в новых cmdline-tools заменён «Android CLI»).
+- Rust-таргеты Android — в тулчейне 1.99.1; `cargo-ndk` 4.x. `adb` — из `%ANDROID_HOME%\platform-tools` (в `C:\adb`
+  лежит старый).
+- Сборка (PowerShell; `JAVA_HOME` — JDK 17+, на машине Zulu 21):
+  ```powershell
+  cargo +1.99.1 ndk -t arm64-v8a -t armeabi-v7a -t x86_64 --platform 26 -o crates/android/jniLibs build --release -p ymsync-android
+  cd android; .\gradlew.bat testDebugUnitTest assembleDebug     # APK: app/build/outputs/apk/debug/app-debug.apk
+  & "$env:ANDROID_HOME\emulator\emulator.exe" -avd ymsync-test -no-window -no-audio   # эмулятор без окна
+  adb install -r app\build\outputs\apk\debug\app-debug.apk; adb logcat -s ymsync   # лог ядра — тег ymsync
+  ```
+- AGP 9: Kotlin встроен (плагина `kotlin-android` нет), Compose-компилятор — плагин той же версии, что Kotlin.
+  Версии — `android/gradle/libs.versions.toml`, версия приложения — `android/version.properties`.
+- Устройство: звук играет плеер самого ядра (`core/src/player.rs`, rodio → AAudio; фичи `audio-rodio`, `tls-rustls`
+  только для Android), не ExoPlayer — его отставание позиции давало бесконечные перемотки. Media3 — только
+  MediaSession и уведомление: `playback/CorePlayer.kt` (`SimpleBasePlayer` поверх снапшота), `PlaybackService.kt`.
+  Без комнаты телефон держит свою невидимую комнату (`room=телефон`, релей на 127.0.0.1). Команды — общий язык
+  `ymsync::ui::UiCommand` (мост и телефон); JNI-класс `ru.combogame.yamodsync.core.Native`, ответы `{ok}`/`{error,code}`.
+- Снапшот ядра не несёт `queue`, если её ревизия уже отдана: `CoreSession` держит прежнюю. `AppModel` — вход,
+  комната, настройки (`settings/AppSettings.kt`, DataStore; пароль комнаты там же), перезапуск сессии при смене
+  комнаты, качества, ника. Лайки и фидбек волны — `playback/PlaybackLogic.kt::likeCommands/dislikeCommands`.
+- «Вперемешку» в «Мне нравится» перемешивает список на телефоне и потом шлёт `shuffle on`: релей не перемешивает
+  `set_queue`, а его shuffle трогает только то, что впереди.
+- Debug-витрина без входа: `adb shell am start -n ru.combogame.yamodsync/.debug.ShowcaseActivity -e screen <экран>`
+  (`home`, `home-guest`, `collection`, `room`, `room-join`, `player`, `settings`, `room-live` — настоящее ядро и релей
+  ПК на `ws://10.0.2.2:8799`). Скриншот — `adb exec-out screencap -p > файл` из Git Bash (PowerShell портит байты).
+- Самообновление (`update/`): `api.github.com/.../releases`, тег `android-v*`, файл `YaModSync-*.apk`, SHA-256 из
+  `SHA256SUMS.txt` обязателен; установка — сессия `PackageInstaller` + `InstallReceiver`. Ключ подписи —
+  `C:\Users\User\YaModSync-keys` (вне репозитория, секреты GitHub — по docs/android.md), локально —
+  `android/keystore.properties` (в .gitignore). Debug и release подписаны разными ключами: смена — через удаление.
+- Тесты Kotlin — JVM (`app/src/test`), без Robolectric: только чистые функции и модели. DataStore в тестах —
+  в памяти: файловый на JVM под Windows не может заменить свой файл при второй записи.
+- Material 3 Expressive: `Slider` рисует толстую дорожку с разрывом — у перемотки свои `thumb`/`track`. Тема всегда
+  тёмная: `enableEdgeToEdge(SystemBarStyle.dark(...))`, иначе на графите значки статус-бара тусклые.
+- Аудиовыход ядра (`core/src/player.rs`): `Sink` подключён к своему микшеру (`SharedOutput`), поток устройства его только
+  тянет. Смена маршрута (выключили Bluetooth) убивает поток AAudio (`DeviceNotAvailable`) — `keep_output` открывает новый,
+  звук идёт с того же сэмпла. Без этого `Sink::try_seek`/`clear` ждали аудиопоток вечно и вешали синхрон. Плеер создаётся
+  на каждый старт сессии: уничтоженный закрывает свой поток (`AudioEvent::Closed`). Тесты плеера — `--features audio-rodio`.
+- Наушники отключились или звонок в комнате → громкость 0 только здесь (`FocusController`); это «пауза на телефоне»
+  (`playback/PlaybackLogic.kt::mutedHere`, `playingHere`), и любой `Toggle` включает звук, а не ставит паузу всем
+  (`toggleCommands`, перехват в `CoreSession.command`).
+- WebView входа (`auth/LoginScreen.kt`) — с `layoutParams` MATCH_PARENT: с WRAP_CONTENT от `AndroidView` в нём
+  `100vh` = 0, и выезжающие меню Яндекса ID (повторная отправка кода) оказываются над экраном. Отладка страницы —
+  debug-сборка, `adb forward tcp:9339 localabstract:webview_devtools_remote_<pid>` и CDP на этом порту.
 
 ## Синхрон
 

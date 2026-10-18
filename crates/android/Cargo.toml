@@ -1,0 +1,38 @@
+[package]
+name = "ymsync-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib for System.loadLibrary; rlib so the session can be tested on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.104"
+# Pure Rust, so the JNI surface compiles — and is type-checked — on the host too.
+jni = "0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tracing = "0.1.44"
+ymsync = { version = "0.3.1", path = "../core", default-features = false }
+ymsync-proto = { version = "0.3.1", path = "../proto" }
+
+# The phone's own audio and TLS. Only on Android: on the host (the CI's
+# `cargo test --workspace` on Linux) `cpal` would want ALSA, and the session's
+# tests hand it a player of their own anyway.
+[target.'cfg(target_os = "android")'.dependencies]
+ymsync = { version = "0.3.1", path = "../core", default-features = false, features = ["audio-rodio", "tls-rustls"] }
+# The JavaVM and app context, handed to `cpal`: its AAudio backend asks
+# `android.media.AudioTrack` for buffer sizes over JNI and panics without them.
+ndk-context = "0.1.1"
+android_logger = "0.15"
+log = "0.4"
+# With no subscriber, `tracing` hands its events to `log`, and so to logcat.
+tracing = { version = "0.1.44", features = ["log"] }
+
+[dev-dependencies]
+ymsync-relay = { version = "0.3.1", path = "../relay", default-features = false }

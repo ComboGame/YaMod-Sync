@@ -8,7 +8,8 @@
 Только для пользователей с **подпиской Плюс**: каждый слушает со своего
 аккаунта, приложение не открывает платное и не скачивает музыку.
 
-**[Скачать последнюю версию](https://github.com/ComboGame/YaMod-Sync/releases/latest)** · Windows 10/11, x64
+**[Скачать последнюю версию](https://github.com/ComboGame/YaMod-Sync/releases/latest)** · Windows 10/11, x64 ·
+приложение для Android — в [Releases](https://github.com/ComboGame/YaMod-Sync/releases) с тегом `android-v…`
 
 ## Возможности
 
@@ -38,6 +39,13 @@
 
 Автообновление приложения отключено, чтобы поверх Sync не встала обычная
 Яндекс Музыка. Новые версии выходят в Releases.
+
+## Телефон
+
+Приложение для Android (8.0+) — своё, не на основе приложения Яндекса: «Моя волна»
+с режимами, «Мне нравится», комнаты как на ПК и плеер с уведомлением на экране
+блокировки. В комнате телефон слушает вместе с компьютерами. Установка, обновления
+и выпуск версий — [docs/android.md](docs/android.md).
 
 ## Сервер
 
@@ -82,6 +90,8 @@ docker compose up -d --build
 | `crates/core` | Библиотека ядра: клиент API Яндекс Музыки, связь с релеем, движок синхрона, «Моя волна» |
 | `crates/relay` | `ymsync-relay`: сервер комнаты — участники, общие часы, очередь и позиция |
 | `crates/proto` | Формат сообщений, оценка смещения часов, математика коррекции |
+| `android/` | Приложение для Android: Kotlin, Jetpack Compose, Media3 (уведомление и кнопки) |
+| `crates/android` | Ядро для телефона через JNI: то же ядро, свой плеер (rodio) и своя комната, когда слушаете одни |
 | `deploy/`, `Dockerfile`, `docker-compose.yml` | Развёртывание сервера |
 
 ## Сборка
@@ -118,12 +128,26 @@ cargo test --workspace
 cargo build --release -p ymsync-relay
 ```
 
+### Android
+
+Нужны Android SDK и NDK, JDK 17+ и Rust с таргетами Android и `cargo-ndk`.
+
+```powershell
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 --platform 26 -o crates/android/jniLibs build --release -p ymsync-android
+cd android
+.\gradlew.bat testDebugUnitTest assembleDebug
+```
+
+Подробнее — [docs/android.md](docs/android.md).
+
 ### Релизы
 
 Релизы собирает GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml))
 на Windows. Чтобы выпустить новую версию, поднимите номер в `mod/VERSION` и
 запушьте: workflow соберёт установщик и опубликует релиз `mod-v<версия>` с
-контрольной суммой.
+контрольной суммой. Приложение для Android выпускает
+[`.github/workflows/android-release.yml`](.github/workflows/android-release.yml)
+по версии из `android/version.properties` — релиз `android-v<версия>`.
 
 ## Лицензия
 

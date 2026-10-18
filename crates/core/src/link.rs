@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::debug;
 use ymsync_proto::{
-    ClientMsg, ClockSampler, Command, Event, PROTOCOL_VERSION, ServerMsg, sample_from_roundtrip,
+    ClientMsg, ClockSampler, Command, Event, PROTOCOL_VERSION, RoomListing, ServerMsg, sample_from_roundtrip,
     unix_ms,
 };
 
@@ -433,6 +433,75 @@ async fn next_server_msg(read: &mut WsRead, timeout: Duration) -> Result<ServerM
                     Err(err) => debug!(%err, "undecodable frame from the relay"),
                 }
             }
+            Some(Ok(_)) => {}
+        }
+    }
+}
+
+/// How long a room list may take. A relay from before `list_rooms` reads the
+/// request as a hello that never comes and stays silent, so this is also how
+/// long it takes to learn the relay is old — short enough for a form to wait.
+const ROOMS_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Why a relay gave no room list. Each reads as the sentence the join form
+/// shows, in the same words as the mod on the desktop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomsError {
+    Unauthorized,
+    /// The relay predates the room list; rooms have to be named by hand.
+    OldRelay,
+    Unreachable(String),
+}
+
+impl std::fmt::Display for RoomsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RoomsError::Unauthorized => f.write_str("неверный пароль"),
+            RoomsError::OldRelay => f.write_str(
+                "сервер не прислал список комнат — возможно, он старой версии. Введите название сами",
+            ),
+            RoomsError::Unreachable(why) => write!(f, "не удалось подключиться к серверу: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for RoomsError {}
+
+/// The rooms a relay holds, for somebody who knows its password: one short
+/// connection that sends `list_rooms` instead of a hello.
+pub async fn list_rooms(relay: &str, token: &str) -> Result<Vec<RoomListing>, RoomsError> {
+    tokio::time::timeout(ROOMS_TIMEOUT, ask_for_rooms(relay, token))
+        .await
+        .unwrap_or(Err(RoomsError::OldRelay))
+}
+
+async fn ask_for_rooms(relay: &str, token: &str) -> Result<Vec<RoomListing>, RoomsError> {
+    let (ws, _response) = tokio_tungstenite::connect_async(relay)
+        .await
+        .map_err(|err| RoomsError::Unreachable(err.to_string()))?;
+    let (mut sink, mut read) = ws.split();
+    send_msg(
+        &mut sink,
+        &ClientMsg::ListRooms {
+            protocol: PROTOCOL_VERSION,
+            token: token.to_string(),
+        },
+    )
+    .await
+    .map_err(|err| RoomsError::Unreachable(format!("{err:#}")))?;
+    loop {
+        match read.next().await {
+            None | Some(Ok(Message::Close(_))) => return Err(RoomsError::OldRelay),
+            Some(Err(err)) => return Err(RoomsError::Unreachable(err.to_string())),
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMsg>(text.as_str()) {
+                Ok(ServerMsg::Rooms { rooms }) => return Ok(rooms),
+                Ok(ServerMsg::Error { code, .. }) if code == "unauthorized" => {
+                    return Err(RoomsError::Unauthorized);
+                }
+                // `expected_hello`, `protocol`: whatever this relay is, it does not list.
+                Ok(ServerMsg::Error { .. }) => return Err(RoomsError::OldRelay),
+                _ => {}
+            },
             Some(Ok(_)) => {}
         }
     }

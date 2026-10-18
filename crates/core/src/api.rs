@@ -43,11 +43,65 @@ pub struct YandexMusic {
     /// This account's numeric id, asked for once. Every «Мне нравится» call needs
     /// it, and it cannot change under a fixed token.
     uid: tokio::sync::OnceCell<i64>,
+    /// Which of a track's variants [`Self::stream_url`] resolves.
+    quality: Quality,
+}
+
+/// How a track is fetched when this client resolves it: the best MP3 Yandex
+/// offers, or the lightest, to spare a phone's data plan.
+///
+/// There is no lossless here on purpose: Yandex hands FLAC only through a
+/// request signed with a key built into its own apps, and encrypted at that.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quality {
+    #[default]
+    High,
+    Economy,
+}
+
+/// The variant to play at `quality`: never a preview, MP3 when there is one
+/// (it is what the signed `get-mp3` path serves), otherwise whatever is left.
+fn pick_variant(variants: &[DownloadInfo], quality: Quality) -> Option<&DownloadInfo> {
+    let playable: Vec<&DownloadInfo> = variants.iter().filter(|v| !v.preview).collect();
+    let mp3: Vec<&DownloadInfo> = playable
+        .iter()
+        .copied()
+        .filter(|v| v.codec.eq_ignore_ascii_case("mp3"))
+        .collect();
+    let pool = if mp3.is_empty() { playable } else { mp3 };
+    match quality {
+        Quality::High => pool.into_iter().max_by_key(|v| v.bitrate_in_kbps),
+        Quality::Economy => pool.into_iter().min_by_key(|v| v.bitrate_in_kbps),
+    }
 }
 
 /// The platform TLS stack (schannel on Windows) needs no help.
+#[cfg(not(feature = "tls-rustls"))]
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+}
+
+/// Trusts the bundled webpki roots rather than the platform verifier.
+///
+/// `reqwest`'s rustls support would otherwise reach for
+/// `rustls-platform-verifier`, which on Android has to be handed a JVM before its
+/// first use. A fixed root set is one less moving part across the JNI boundary.
+/// The provider is named explicitly so this does not depend on whether
+/// [`crate::install_tls_provider`] ran first.
+#[cfg(feature = "tls-rustls")]
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let config =
+        rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+    reqwest::Client::builder().use_preconfigured_tls(config)
 }
 
 impl YandexMusic {
@@ -68,7 +122,14 @@ impl YandexMusic {
             token: token.into(),
             base: base.into().trim_end_matches('/').to_string(),
             uid: tokio::sync::OnceCell::new(),
+            quality: Quality::High,
         })
+    }
+
+    /// The same client, resolving tracks at `quality`.
+    pub fn with_quality(mut self, quality: Quality) -> Self {
+        self.quality = quality;
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -216,9 +277,13 @@ impl YandexMusic {
                     &[("format", format), ("timeStamp", &stamp), ("sign", &sign)],
                 )
                 .await;
-            let Ok(found) = found else {
-                // 404 for a format the track has not got; try the next one.
-                continue;
+            let found = match found {
+                Ok(found) => found,
+                Err(err) => {
+                    // 404 for a format the track has not got; try the next one.
+                    tracing::info!(track = id, format, "no lyrics in this format: {err:#}");
+                    continue;
+                }
             };
             if found.download_url.is_empty() {
                 continue;
@@ -498,6 +563,20 @@ impl YandexMusic {
         Ok(())
     }
 
+    /// The presets of «Моя волна» — the wheel on the app's main page, which the
+    /// phone shows as a carousel. Picked for this account by Yandex, so they
+    /// change from one call to the next.
+    pub async fn wave_presets(&self) -> Result<Vec<WavePreset>> {
+        let url = self.url("/wheel/new");
+        // An empty JSON object, not an empty body: without a body the endpoint
+        // answers 415, with an empty one 400.
+        let body = self
+            .send(self.authorized(self.http.post(&url)).json(&serde_json::json!({})), &url)
+            .await
+            .context("режимы «Моей волны»")?;
+        parse_wheel(&body)
+    }
+
     /// Resolves a playable, signed URL for the track's audio.
     pub async fn stream_url(&self, track_id: &str) -> Result<String> {
         let variants: Vec<DownloadInfo> = self
@@ -505,21 +584,12 @@ impl YandexMusic {
             .await
             .with_context(|| format!("requesting download info for track {track_id}"))?;
 
-        let playable: Vec<&DownloadInfo> = variants.iter().filter(|v| !v.preview).collect();
-        if playable.is_empty() {
+        let Some(best) = pick_variant(&variants, self.quality) else {
             bail!(
                 "для трека {track_id} нет доступных вариантов загрузки — обычно это \
                  региональное или лицензионное ограничение на этом аккаунте"
             );
-        }
-        // Prefer MP3: it is what the signed `get-mp3` path serves, and rodio
-        // decodes it without extra containers.
-        let best = playable
-            .iter()
-            .filter(|v| v.codec.eq_ignore_ascii_case("mp3"))
-            .max_by_key(|v| v.bitrate_in_kbps)
-            .or_else(|| playable.iter().max_by_key(|v| v.bitrate_in_kbps))
-            .expect("playable is not empty");
+        };
 
         let spec = self.stream_spec(&best.download_info_url).await?;
         Ok(spec.to_signed_url())
@@ -1203,6 +1273,99 @@ impl StreamSpec {
     }
 }
 
+/// One preset of «Моя волна», as the wheel offers it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WavePreset {
+    /// The wheel's id for it, the seeds joined: `genre:allrock`,
+    /// `user:onyourwave` (the app's «Назад к привычному»), `diversity:reshuffle`.
+    pub id: String,
+    pub title: String,
+    /// The line above the title, «В стиле артиста»; most presets have none.
+    pub description: Option<String>,
+    /// What a wave session for it is opened with.
+    pub seeds: Vec<String>,
+    /// A cover template, `…/%%`, for presets that have a picture.
+    pub cover_uri: Option<String>,
+    /// The colour the app tints the preset with, `#F66880`.
+    pub color: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Wheel {
+    #[serde(default)]
+    items: Vec<WheelItem>,
+}
+
+#[derive(Deserialize)]
+struct WheelItem {
+    #[serde(default)]
+    id: String,
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    data: Option<WheelData>,
+}
+
+#[derive(Deserialize)]
+struct WheelData {
+    wave: Option<WheelWave>,
+    agent: Option<WheelAgent>,
+}
+
+#[derive(Deserialize)]
+struct WheelWave {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    seeds: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct WheelAgent {
+    cover: Option<WheelCover>,
+}
+
+#[derive(Deserialize)]
+struct WheelCover {
+    uri: Option<String>,
+    color: Option<String>,
+}
+
+/// Reads the wheel. Only its waves: the app also puts albums, promos and
+/// settings on it, none of which is a preset to start.
+pub fn parse_wheel(body: &str) -> Result<Vec<WavePreset>> {
+    let mut document: serde_json::Value =
+        serde_json::from_str(body).with_context(|| format!("колесо волны — не JSON: {}", excerpt(body)))?;
+    if let Some(result) = document.get_mut("result").map(serde_json::Value::take) {
+        document = result;
+    }
+    let wheel: Wheel = serde_json::from_value(document)
+        .with_context(|| format!("неожиданная структура колеса волны: {}", excerpt(body)))?;
+    Ok(wheel
+        .items
+        .into_iter()
+        .filter(|item| item.kind.eq_ignore_ascii_case("wave"))
+        .filter_map(|item| {
+            let data = item.data?;
+            let wave = data.wave?;
+            if wave.seeds.is_empty() || wave.name.is_empty() {
+                return None;
+            }
+            let cover = data.agent.and_then(|agent| agent.cover);
+            Some(WavePreset {
+                id: item.id,
+                title: wave.name,
+                description: item.description.filter(|d| !d.trim().is_empty()),
+                seeds: wave.seeds,
+                cover_uri: cover.as_ref().and_then(|c| c.uri.clone()),
+                color: cover.and_then(|c| c.color),
+            })
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountStatus {
@@ -1701,6 +1864,73 @@ pub fn parse_playlist_ref(raw: &str) -> Result<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `POST /wheel/new`, as the desktop app's main page asks for it: the
+    /// presets of «Моя волна», the same ones its wheel shows.
+    const WHEEL: &str = include_str!("../tests/fixtures/wheel-new.json");
+
+    #[test]
+    fn the_wheel_is_read_from_its_landing_block() {
+        let presets = parse_wheel(WHEEL).expect("wheel");
+        assert!(presets.len() >= 5, "{presets:?}");
+        for preset in &presets {
+            assert!(!preset.title.is_empty(), "{preset:?}");
+            assert!(!preset.seeds.is_empty(), "{preset:?}");
+        }
+        assert_eq!(presets[0].id, "artist:1000001");
+        assert_eq!(presets[0].title, "Артист");
+        assert_eq!(presets[0].description.as_deref(), Some("В стиле артиста"));
+        assert_eq!(presets[0].seeds, ["artist:1000001"]);
+        assert_eq!(presets[0].color.as_deref(), Some("#F66880"));
+        assert!(presets[0].cover_uri.as_deref().is_some_and(|uri| uri.ends_with("%%")));
+        let usual = presets.iter().find(|p| p.id == "user:onyourwave").expect("back to usual");
+        assert_eq!(usual.description, None, "no line under it in the app either");
+    }
+
+    fn variant(codec: &str, kbps: u32, preview: bool) -> DownloadInfo {
+        DownloadInfo {
+            codec: codec.into(),
+            bitrate_in_kbps: kbps,
+            preview,
+            download_info_url: format!("https://storage/{codec}-{kbps}"),
+        }
+    }
+
+    #[test]
+    fn high_quality_picks_the_best_mp3_and_economy_the_lightest() {
+        let variants = [
+            variant("mp3", 192, false),
+            variant("mp3", 320, false),
+            variant("aac", 256, false),
+            variant("mp3", 128, false),
+            variant("mp3", 320, true),
+        ];
+        assert_eq!(pick_variant(&variants, Quality::High).unwrap().bitrate_in_kbps, 320);
+        let light = pick_variant(&variants, Quality::Economy).unwrap();
+        assert_eq!((light.codec.as_str(), light.bitrate_in_kbps), ("mp3", 128));
+    }
+
+    #[test]
+    fn a_preview_is_never_what_plays_and_another_codec_stands_in_for_mp3() {
+        assert!(pick_variant(&[variant("mp3", 320, true)], Quality::High).is_none());
+        let only_aac = [variant("aac", 64, false), variant("aac", 256, false)];
+        assert_eq!(pick_variant(&only_aac, Quality::High).unwrap().bitrate_in_kbps, 256);
+        assert_eq!(pick_variant(&only_aac, Quality::Economy).unwrap().bitrate_in_kbps, 64);
+    }
+
+    #[test]
+    fn quality_is_written_the_way_the_phone_sends_it() {
+        assert_eq!(serde_json::from_str::<Quality>(r#""economy""#).unwrap(), Quality::Economy);
+        assert_eq!(Quality::default(), Quality::High);
+    }
+
+    /// Other endpoints wrap their answer in `result`; this one did not when it
+    /// was looked at. Either shape reads the same.
+    #[test]
+    fn a_wrapped_wheel_reads_the_same() {
+        let wrapped = format!(r#"{{"result": {WHEEL}}}"#);
+        assert_eq!(parse_wheel(&wrapped).unwrap(), parse_wheel(WHEEL).unwrap());
+    }
 
     #[test]
     fn signed_url_has_the_expected_shape() {

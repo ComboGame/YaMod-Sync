@@ -1,0 +1,135 @@
+{
+ "wheelId": "00000000-0000-0000-0000-000000000000",
+ "items": [
+  {
+   "id": "artist:1000001",
+   "type": "WAVE",
+   "style": "DEFAULT",
+   "description": "В стиле артиста",
+   "data": {
+    "wave": {
+     "name": "Артист",
+     "description": "Моя волна по артисту",
+     "seeds": [
+      "artist:1000001"
+     ]
+    },
+    "agent": {
+     "animationUri": "https://music-custom-wave-media.s3.yandex.net/vibe_agent_aritst_v3.json",
+     "cover": {
+      "uri": "avatars.yandex.net/get-music-content/1/a.p.1000001/%%",
+      "color": "#F66880"
+     },
+     "entity": {
+      "type": "artist"
+     }
+    }
+   }
+  },
+  {
+   "id": "user:onyourwave",
+   "type": "WAVE",
+   "style": "CONTROL_ACCENT",
+   "data": {
+    "wave": {
+     "name": "Назад к привычному",
+     "seeds": [
+      "user:onyourwave"
+     ]
+    },
+    "agent": {
+     "animationUri": "https://music-custom-wave-media.s3.yandex.net/InExZ16iS5",
+     "cover": {
+      "uri": "avatars.mds.yandex.net/get-music-misc/28052/img.6a02b79f69c75168250b2888/%%",
+      "color": "#efebf0"
+     }
+    }
+   }
+  },
+  {
+   "id": "genre:allrock",
+   "type": "WAVE",
+   "style": "DEFAULT",
+   "data": {
+    "wave": {
+     "name": "Е-е-е, рок!",
+     "description": "Моя волна по жанру",
+     "seeds": [
+      "genre:allrock"
+     ]
+    },
+    "agent": {
+     "animationUri": "https://music-custom-wave-media.music.yandex.net/vibe_agent_genre_allrock_v3.json",
+     "cover": {
+      "uri": "https://avatars.mds.yandex.net/get-music-misc/28052/img.69b6cd16d9c33d21280a4b09/%%",
+      "color": "#426DF5"
+     }
+    }
+   }
+  },
+  {
+   "id": "mood:energetic",
+   "type": "WAVE",
+   "style": "DEFAULT",
+   "data": {
+    "wave": {
+     "name": "Добавить энергии",
+     "description": "Моя волна по настроению",
+     "seeds": [
+      "mood:energetic"
+     ]
+    },
+    "agent": {
+     "animationUri": "https://music-custom-wave-media.music.yandex.net/vibe_agent_mood_energetic_v3.json",
+     "cover": {
+      "uri": "https://avatars.mds.yandex.net/get-music-misc/49997/img.69b6d0f842c3f64e2687102b/%%",
+      "color": "#4F6C9B"
+     }
+    }
+   }
+  },
+  {
+   "id": "diversity:reshuffle",
+   "type": "WAVE",
+   "style": "CONTROL_ACCENT",
+   "data": {
+    "wave": {
+     "name": "Встряхнуть Мою волну",
+     "description": "Моя волна по характеру",
+     "seeds": [
+      "diversity:reshuffle_1792290996435"
+     ]
+    },
+    "agent": {
+     "animationUri": "https://music-custom-wave-media.s3.yandex.net/non_entity_animation.json",
+     "cover": {
+      "uri": "https://avatars.mds.yandex.net/get-music-misc/30221/69afd56fe2f5dd07395f4a24-agent-cover-1778563212216/%%",
+      "color": "#FFFFFF"
+     }
+    }
+   }
+  },
+  {
+   "id": "genre:ruspop,mood:happy",
+   "type": "WAVE",
+   "style": "DEFAULT",
+   "data": {
+    "wave": {
+     "name": "Радостная русская поп-музыка",
+     "description": "Моя волна",
+     "seeds": [
+      "genre:ruspop",
+      "mood:happy"
+     ]
+    },
+    "agent": {
+     "animationUri": "https://music-custom-wave-media.music.yandex.net/vibe_agent_genre_pop_3_v3.json",
+     "cover": {
+      "uri": "https://avatars.mds.yandex.net/get-music-misc/2413828/img.69e69625671db8677b13380b/%%",
+      "color": "#FF8A2A"
+     }
+    }
+   }
+  }
+ ]
+}

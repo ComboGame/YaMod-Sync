@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Только в debug: экраны с выдуманными данными, чтобы смотреть вёрстку без входа.
+             adb shell am start -n ru.combogame.yamodsync/.debug.ShowcaseActivity -e screen home -->
+        <activity android:name=".debug.ShowcaseActivity" android:exported="true" android:theme="@style/Theme.YaModSync" />
+    </application>
+</manifest>

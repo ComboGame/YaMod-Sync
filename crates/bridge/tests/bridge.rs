@@ -1515,9 +1515,13 @@ async fn shaking_the_wave_up_opens_a_new_session() {
     assert_eq!(yandex.count("/rotor/session/new"), 1, "asked plainly, the wave only goes on");
 
     app.command(json!({"c": "wave", "fresh": true}));
-    app.until("a new batch playing", 10_000, |seen| seen.snapshot["track"]["track_id"] == "v4").await;
+    // The new queue goes out before the claim on the station, so the batch can
+    // be playing a relay round trip before `feeding` comes back true.
+    app.until("a new batch playing, fed by us", 10_000, |seen| {
+        seen.snapshot["track"]["track_id"] == "v4" && seen.snapshot["feeding"] == true
+    })
+    .await;
     assert_eq!(yandex.count("/rotor/session/new"), 2);
-    assert_eq!(app.snapshot()["feeding"], true);
 
     app.stop();
     relay.stop().await;
