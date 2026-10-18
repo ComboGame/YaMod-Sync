@@ -20,6 +20,7 @@ import ru.combogame.yamodsync.auth.LoginState
 import ru.combogame.yamodsync.ui.collection.CollectionScreen
 import ru.combogame.yamodsync.ui.home.HomeScreen
 import ru.combogame.yamodsync.ui.player.FullPlayer
+import ru.combogame.yamodsync.ui.room.RoomScreen
 import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.shell.Tab
 import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
@@ -73,6 +74,7 @@ private fun SignedIn(model: AppModel) {
     val snapshot by model.session.snapshot.collectAsStateWithLifecycle()
     val room by model.room.collectAsStateWithLifecycle()
     val login by model.login.collectAsStateWithLifecycle()
+    val settings by model.settings.collectAsStateWithLifecycle()
     // Режимы колеса нужны только Главной; сессия ядра должна уже идти, иначе их не у кого спросить.
     var presets by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<ru.combogame.yamodsync.core.WavePreset>?>(null) }
     val running = snapshot != null
@@ -98,7 +100,16 @@ private fun SignedIn(model: AppModel) {
             when (tab) {
                 Tab.Home -> HomeScreen(snapshot, presets, model.session::command)
                 Tab.Collection -> CollectionScreen(snapshot, likes, model.session::command)
-                else -> Placeholder(tab.title)
+                Tab.Room -> RoomScreen(
+                    snapshot = snapshot,
+                    room = room,
+                    settings = settings,
+                    loadRooms = model::rooms,
+                    onJoin = model::join,
+                    onLeave = model::leave,
+                    onCommand = model.session::command,
+                    onOpenPlayer = { screen = Screen.Player },
+                )
             }
         }
         Screen.Player -> FullPlayer(

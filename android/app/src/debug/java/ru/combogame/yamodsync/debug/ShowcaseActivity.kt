@@ -9,13 +9,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import kotlinx.coroutines.launch
 import ru.combogame.yamodsync.core.Listener
+import ru.combogame.yamodsync.core.RoomConfig
+import ru.combogame.yamodsync.core.RoomListing
+import ru.combogame.yamodsync.settings.AppSettings
+import ru.combogame.yamodsync.ui.room.RoomScreen
 import ru.combogame.yamodsync.core.LyricLine
 import ru.combogame.yamodsync.core.Lyrics
 import ru.combogame.yamodsync.core.RoomCommand
@@ -35,7 +41,7 @@ class ShowcaseActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val screen = intent.getStringExtra("screen") ?: "home"
-        setContent { YaModSyncTheme { Showcase(screen) } }
+        setContent { YaModSyncTheme { if (screen == "room-live") LiveRoom() else Showcase(screen) } }
     }
 }
 
@@ -51,6 +57,11 @@ val demoLyrics = Lyrics(
     synced = true,
     lines = listOf("Город не спит", "Огни вдоль реки", "Мы идём вдвоём", "", "Ночной город", "Тише, тише").mapIndexed { i, t -> LyricLine(i * 6_000L + 60_000, t) },
     writers = listOf("Автор"),
+)
+
+val demoRooms = listOf(
+    RoomListing("дом", listOf("Аня", "Миша"), "Ночной город — Исполнитель", playing = true, wave = true),
+    RoomListing("работа", emptyList()),
 )
 
 val demoPresets = listOf(
@@ -83,6 +94,7 @@ fun Showcase(screen: String) {
                 // Пресет, который ведёт другой участник: подпись «ведёт Аня» и «Вернуться к „Моей волне“».
                 "home-guest" -> demoSnapshot.copy(station = """{"seeds":["genre:rnb"],"name":"R&B","by":"Аня"}""", feeding = false)
                 "home-unfed" -> demoSnapshot.copy(stationUnfed = true)
+                "room" -> demoSnapshot.copy(admin = true, feeding = false, station = """{"seeds":["user:onyourwave"],"by":"Аня"}""", driftMs = 24, rttMs = 41, queue = demoLikes)
                 else -> demoSnapshot
             },
         )
@@ -105,9 +117,53 @@ fun Showcase(screen: String) {
         when (t) {
             Tab.Home -> HomeScreen(snapshot, demoPresets, onCommand)
             Tab.Collection -> CollectionScreen(snapshot, demoLikes, onCommand)
-            else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(t.title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
-            }
+            Tab.Room -> RoomScreen(
+                snapshot = snapshot,
+                room = if (screen == "room-join") null else RoomConfig("ws://10.0.2.2:8799", "дом", ""),
+                settings = AppSettings(relay = "ws://10.0.2.2:8799", room = "дом"),
+                loadRooms = { _, _ -> Result.success(demoRooms) },
+                onJoin = { _, _ -> },
+                onLeave = {},
+                onCommand = onCommand,
+                onOpenPlayer = {},
+            )
         }
+    }
+}
+
+/**
+ * Вкладка «Комната» на настоящем ядре, без входа в Яндекс: список комнат и вход
+ * проверяются на релее с ПК (`ws://10.0.2.2:8799`). Треки без токена не играют.
+ */
+@Composable
+fun LiveRoom() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val native = remember { ru.combogame.yamodsync.core.JniNative(context.applicationContext) }
+    val session = remember { ru.combogame.yamodsync.core.CoreSession(native, scope, kotlinx.coroutines.Dispatchers.IO) }
+    val snapshot by session.snapshot.collectAsState()
+    var room by remember { mutableStateOf<RoomConfig?>(null) }
+    fun start(config: RoomConfig?, name: String) {
+        room = config
+        scope.launch {
+            session.start(ru.combogame.yamodsync.core.StartConfig(dataDir = context.filesDir.absolutePath, name = name.ifBlank { "эмулятор" }, clientId = "showcase-emulator", room = config))
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { kotlinx.coroutines.runBlocking { session.stop() } } }
+    AppShell(snapshot, roomName = room?.room, account = "Эмулятор", onCommand = session::command, onOpenPlayer = {}, onOpenSettings = {}, initialTab = Tab.Room) { _, _ ->
+        RoomScreen(
+            snapshot = snapshot,
+            room = room,
+            settings = AppSettings(relay = "ws://10.0.2.2:8799"),
+            loadRooms = { relay, password ->
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { ru.combogame.yamodsync.core.parseReply(native.rooms(relay, password)) }.mapCatching {
+                    ru.combogame.yamodsync.core.coreJson.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(RoomListing.serializer()), it)
+                }
+            },
+            onJoin = { config, name -> start(config, name) },
+            onLeave = { start(null, "") },
+            onCommand = session::command,
+            onOpenPlayer = {},
+        )
     }
 }

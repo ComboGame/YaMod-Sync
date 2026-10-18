@@ -15,7 +15,13 @@ import ru.combogame.yamodsync.auth.loginStateFor
 import ru.combogame.yamodsync.core.CoreSession
 import ru.combogame.yamodsync.core.NativeApi
 import ru.combogame.yamodsync.core.RoomConfig
+import ru.combogame.yamodsync.core.RoomListing
 import ru.combogame.yamodsync.core.StartConfig
+import ru.combogame.yamodsync.core.coreJson
+import ru.combogame.yamodsync.core.parseReply
+import ru.combogame.yamodsync.settings.AppSettings
+import ru.combogame.yamodsync.settings.SettingsStore
+import kotlinx.serialization.builtins.ListSerializer
 
 /**
  * Всё, что живёт дольше экрана: вход, сессия ядра и то, к какой комнате она
@@ -37,13 +43,19 @@ class AppModel(
     private val _room = MutableStateFlow<RoomConfig?>(null)
     val room: StateFlow<RoomConfig?> = _room.asStateFlow()
 
-    /** Настройки сессии, которые задают экраны (ник, качество, id установки). */
-    var name: String = ""
-    var quality: String = "high"
-    var clientId: String = ""
+    private val store = SettingsStore.of(context)
+    private val _settings = MutableStateFlow(AppSettings())
+    val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
     init {
         scope.launch {
+            val loaded = store.current()
+            _settings.value = loaded
+            scope.launch { store.settings.collect { _settings.value = it } }
+            // «Входить при запуске» — сразу в последнюю комнату, иначе своя комната на телефоне.
+            if (loaded.autoJoin && loaded.relay.isNotBlank() && loaded.room.isNotBlank()) {
+                _room.value = RoomConfig(loaded.relay, loaded.room, loaded.password)
+            }
             val saved = tokens.token.first()
             if (saved == null) {
                 _login.value = LoginState.SignedOut()
@@ -83,20 +95,50 @@ class AppModel(
         }
     }
 
-    /** Войти в комнату сервера или (null) вернуться в свою. */
-    fun join(room: RoomConfig?) {
+    /** Войти в комнату сервера; адрес, пароль, комната и ник запоминаются для следующего раза. */
+    fun join(room: RoomConfig, name: String) {
         _room.value = room
+        scope.launch {
+            store.update { it.copy(relay = room.relay, room = room.room, password = room.password, name = name.trim()) }
+            _settings.value = store.current()
+            restart()
+        }
+    }
+
+    /** Выйти из комнаты — снова своя комната на телефоне. */
+    fun leave() {
+        _room.value = null
         scope.launch { restart() }
     }
+
+    /** Меняет настройки; качество и ник доходят до ядра перезапуском сессии. */
+    fun updateSettings(change: (AppSettings) -> AppSettings) {
+        scope.launch {
+            val before = _settings.value
+            store.update(change)
+            val after = store.current()
+            _settings.value = after
+            if (after.quality != before.quality || after.name != before.name) {
+                if (_login.value is LoginState.SignedIn) restart()
+            }
+        }
+    }
+
+    /** Комнаты на сервере — для формы входа; ошибка несёт код `unauthorized`/`old_relay`/`unreachable`. */
+    suspend fun rooms(relay: String, password: String): Result<List<RoomListing>> =
+        withContext(Dispatchers.IO) { parseReply(native.rooms(relay.trim(), password)) }.mapCatching {
+            coreJson.decodeFromJsonElement(ListSerializer(RoomListing.serializer()), it)
+        }
 
     /** Перезапускает сессию с текущими настройками: вход, комната, качество. */
     suspend fun restart(): Result<Unit> = session.start(
         StartConfig(
             token = token,
-            clientId = clientId,
+            clientId = _settings.value.clientId,
             dataDir = context.filesDir.absolutePath,
-            quality = quality,
-            name = name,
+            quality = _settings.value.quality.core,
+            // Без ника в комнате видно имя аккаунта Яндекса.
+            name = _settings.value.name.ifBlank { (_login.value as? LoginState.SignedIn)?.name.orEmpty() },
             room = _room.value,
         ),
     )
