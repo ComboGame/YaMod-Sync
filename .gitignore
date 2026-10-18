@@ -7,3 +7,6 @@
 
 # Room password for docker compose
 /.env
+
+# MCP-серверы Claude Code: в файле ключи, в репозиторий не кладём
+/.mcp.json
