@@ -16,12 +16,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import ru.combogame.yamodsync.core.Listener
+import ru.combogame.yamodsync.core.LyricLine
+import ru.combogame.yamodsync.core.Lyrics
 import ru.combogame.yamodsync.core.RoomCommand
 import ru.combogame.yamodsync.core.RoomSnapshot
 import ru.combogame.yamodsync.core.TrackRef
 import ru.combogame.yamodsync.core.WavePreset
 import ru.combogame.yamodsync.ui.collection.CollectionScreen
 import ru.combogame.yamodsync.ui.home.HomeScreen
+import ru.combogame.yamodsync.ui.player.FullPlayer
 import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.shell.Tab
 import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
@@ -43,6 +46,12 @@ val demoQueue = listOf(
 
 val demoLikes = demoQueue + listOf("Dangerous" to "David Guetta", "Какаду" to "N1NT3ND0", "Звёзды" to "Группа", "Ветер" to "Певица")
     .mapIndexed { i, (title, artist) -> TrackRef("${i + 3}", "${i + 20}", "Альбом", title, artist, 200_000, null) }
+
+val demoLyrics = Lyrics(
+    synced = true,
+    lines = listOf("Город не спит", "Огни вдоль реки", "Мы идём вдвоём", "", "Ночной город", "Тише, тише").mapIndexed { i, t -> LyricLine(i * 6_000L + 60_000, t) },
+    writers = listOf("Автор"),
+)
 
 val demoPresets = listOf(
     WavePreset("energy", "Энергичное", "Бодрые треки", listOf("mood:energetic"), color = "#f67687"),
@@ -79,6 +88,18 @@ fun Showcase(screen: String) {
         )
     }
     val onCommand: (RoomCommand) -> Unit = { if (it == RoomCommand.Toggle) snapshot = snapshot.copy(roomPlaying = snapshot.roomPlaying != true) }
+    if (screen.startsWith("player")) {
+        FullPlayer(
+            snapshot.copy(driftMs = 38, localTrack = "1", repeat = "all", trackLiked = true, queue = demoLikes),
+            roomName = if (screen == "player-solo") null else "дом",
+            liked = emptySet(),
+            presets = demoPresets,
+            onCommand = onCommand,
+            loadLyrics = { demoLyrics },
+            onClose = {},
+        )
+        return
+    }
     val tab = when (screen.substringBefore('-')) { "collection" -> Tab.Collection; "room" -> Tab.Room; else -> Tab.Home }
     AppShell(snapshot, roomName = "дом", account = "Вы", onCommand = onCommand, onOpenPlayer = {}, onOpenSettings = {}, initialTab = tab) { t, _ ->
         when (t) {

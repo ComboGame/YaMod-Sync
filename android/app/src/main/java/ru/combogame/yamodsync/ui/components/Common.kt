@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -86,14 +87,14 @@ fun Avatar(name: String, size: Dp = 32.dp, modifier: Modifier = Modifier) {
     }
 }
 
-/** Обложка трека из шаблона Яндекса; пока грузится или её нет — серая плашка. */
+/** Обложка трека из шаблона Яндекса; пока грузится или её нет — серая плашка. `size = null` — во всё место. */
 @Composable
-fun Cover(template: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = 8.dp, pixels: Int = 200) {
+fun Cover(template: String?, size: Dp?, modifier: Modifier = Modifier, radius: Dp = 8.dp, pixels: Int = 200) {
     val shape = RoundedCornerShape(radius)
-    Box(modifier.size(size).clip(shape).background(YaTokens.Surface3)) {
+    Box(modifier.then(if (size != null) Modifier.size(size) else Modifier.fillMaxSize()).clip(shape).background(YaTokens.Surface3)) {
         val url = coverUrl(template, pixels)
         if (url != null) {
-            AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(size))
+            AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         }
     }
 }

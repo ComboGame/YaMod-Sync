@@ -17,7 +17,6 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import ru.combogame.yamodsync.MainActivity
 import ru.combogame.yamodsync.YaModSyncApp
-import ru.combogame.yamodsync.core.RoomCommand
 
 private const val LIKE = "ru.combogame.yamodsync.LIKE"
 
@@ -118,14 +117,7 @@ class PlaybackService : MediaSessionService() {
         ): ListenableFuture<SessionResult> {
             if (customCommand.customAction == LIKE) {
                 val model = (application as YaModSyncApp).model
-                val snapshot = model.session.snapshot.value
-                val track = snapshot?.track
-                if (track != null) {
-                    val liked = !snapshot.trackLiked
-                    model.session.command(RoomCommand.Like(track, liked))
-                    // Волну, которую ведёт этот телефон, Яндекс учит тем же сердечком.
-                    if (snapshot.feeding) model.session.command(RoomCommand.WaveFeedback(if (liked) "like" else "unlike", track.trackId))
-                }
+                likeCommands(model.session.snapshot.value).forEach(model.session::command)
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }

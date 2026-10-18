@@ -19,6 +19,7 @@ import ru.combogame.yamodsync.auth.LoginScreen
 import ru.combogame.yamodsync.auth.LoginState
 import ru.combogame.yamodsync.ui.collection.CollectionScreen
 import ru.combogame.yamodsync.ui.home.HomeScreen
+import ru.combogame.yamodsync.ui.player.FullPlayer
 import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.shell.Tab
 import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
@@ -100,7 +101,15 @@ private fun SignedIn(model: AppModel) {
                 else -> Placeholder(tab.title)
             }
         }
-        Screen.Player -> Placeholder("Плеер")
+        Screen.Player -> FullPlayer(
+            snapshot = snapshot,
+            roomName = room?.room,
+            liked = likes.orEmpty().mapTo(HashSet()) { it.trackId },
+            presets = presets,
+            onCommand = model.session::command,
+            loadLyrics = { model.session.lyrics(it).getOrNull() },
+            onClose = { screen = Screen.Shell },
+        )
         Screen.Settings -> Placeholder("Настройки")
     }
 }

@@ -1,5 +1,6 @@
 package ru.combogame.yamodsync.playback
 
+import ru.combogame.yamodsync.core.RoomCommand
 import ru.combogame.yamodsync.core.RoomSnapshot
 
 /** Обложка Яндекса нужного размера: шаблон `…/%%` → `https://…/400x400`. */
@@ -55,4 +56,21 @@ fun focusAction(event: FocusEvent, inRoom: Boolean): FocusAction = when (event) 
     FocusEvent.Gain -> FocusAction.RestoreVolume
     FocusEvent.LossTransient, FocusEvent.Loss, FocusEvent.BecomingNoisy ->
         if (inRoom) FocusAction.MuteLocally else FocusAction.PauseRoom
+}
+
+/**
+ * Сердечко у текущего трека. Волну, которую ведёт этот телефон, Яндекс учит тем же
+ * сердечком; фидбек от остальных не идёт — волна не их (как в моде).
+ */
+fun likeCommands(s: RoomSnapshot?): List<RoomCommand> {
+    val track = s?.track ?: return emptyList()
+    val liked = !s.trackLiked
+    val like = RoomCommand.Like(track, liked)
+    return if (s.feeding) listOf(like, RoomCommand.WaveFeedback(if (liked) "like" else "unlike", track.trackId)) else listOf(like)
+}
+
+/** «Не нравится»: тому, кто ведёт волну, — фидбек и пропуск, остальным — просто пропуск. */
+fun dislikeCommands(s: RoomSnapshot?): List<RoomCommand> {
+    val track = s?.track ?: return emptyList()
+    return if (s.feeding) listOf(RoomCommand.WaveFeedback("dislike", track.trackId), RoomCommand.Next) else listOf(RoomCommand.Next)
 }

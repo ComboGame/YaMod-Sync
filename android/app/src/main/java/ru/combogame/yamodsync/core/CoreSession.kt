@@ -115,7 +115,10 @@ class CoreSession(
         coreJson.decodeFromJsonElement(ListSerializer(TrackRef.serializer()), tracks)
     }
 
-    suspend fun lyrics(trackId: String): Result<JsonElement> = call { native.lyrics(it, trackId) }
+    /** null — у трека нет текста. */
+    suspend fun lyrics(trackId: String): Result<Lyrics?> = call { native.lyrics(it, trackId) }.mapCatching {
+        if (it is kotlinx.serialization.json.JsonNull) null else coreJson.decodeFromJsonElement(Lyrics.serializer(), it)
+    }
 
     suspend fun wavePresets(): Result<List<WavePreset>> = call { native.wavePresets(it) }.mapCatching {
         coreJson.decodeFromJsonElement(ListSerializer(WavePreset.serializer()), it)

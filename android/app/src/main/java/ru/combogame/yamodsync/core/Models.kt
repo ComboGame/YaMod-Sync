@@ -107,6 +107,18 @@ data class WavePreset(
     val color: String? = null,
 )
 
+/** Текст песни из `Native.lyrics`; `synced` — строки со временем, можно следить. */
+@Serializable
+data class Lyrics(
+    val synced: Boolean = false,
+    val lines: List<LyricLine> = emptyList(),
+    val text: String = "",
+    val writers: List<String> = emptyList(),
+)
+
+@Serializable
+data class LyricLine(val atMs: Long, val text: String)
+
 @Serializable
 data class RoomListing(
     val name: String,

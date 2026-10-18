@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ru.combogame.yamodsync.core.RoomCommand
 import ru.combogame.yamodsync.core.RoomSnapshot
 import ru.combogame.yamodsync.core.TrackRef
 
@@ -62,5 +63,27 @@ class FocusPolicyTest {
             assertEquals(FocusAction.Duck, focusAction(FocusEvent.LossTransientCanDuck, inRoom))
             assertEquals(FocusAction.RestoreVolume, focusAction(FocusEvent.Gain, inRoom))
         }
+    }
+}
+
+class LikeCommandsTest {
+    private val track = ru.combogame.yamodsync.core.TrackRef("7", "70")
+
+    @Test
+    fun theWavesFeederTeachesItWithTheHeart() {
+        val s = RoomSnapshot(track = track, feeding = true)
+        assertEquals(listOf(RoomCommand.Like(track, true), RoomCommand.WaveFeedback("like", "7")), likeCommands(s))
+        assertEquals(listOf(RoomCommand.Like(track, false), RoomCommand.WaveFeedback("unlike", "7")), likeCommands(s.copy(trackLiked = true)))
+    }
+
+    @Test
+    fun othersOnlyLikeTheTrack() {
+        assertEquals(listOf(RoomCommand.Like(track, true)), likeCommands(RoomSnapshot(track = track)))
+    }
+
+    @Test
+    fun aDislikeFromAnyoneElseIsASkip() {
+        assertEquals(listOf(RoomCommand.Next), dislikeCommands(RoomSnapshot(track = track)))
+        assertEquals(listOf(RoomCommand.WaveFeedback("dislike", "7"), RoomCommand.Next), dislikeCommands(RoomSnapshot(track = track, feeding = true)))
     }
 }
