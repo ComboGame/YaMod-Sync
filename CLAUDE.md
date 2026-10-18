@@ -112,6 +112,13 @@ Android (`android/`, `crates/android/`; план — `docs/superpowers/plans/202
   в памяти: файловый на JVM под Windows не может заменить свой файл при второй записи.
 - Material 3 Expressive: `Slider` рисует толстую дорожку с разрывом — у перемотки свои `thumb`/`track`. Тема всегда
   тёмная: `enableEdgeToEdge(SystemBarStyle.dark(...))`, иначе на графите значки статус-бара тусклые.
+- Аудиовыход ядра (`core/src/player.rs`): `Sink` подключён к своему микшеру (`SharedOutput`), поток устройства его только
+  тянет. Смена маршрута (выключили Bluetooth) убивает поток AAudio (`DeviceNotAvailable`) — `keep_output` открывает новый,
+  звук идёт с того же сэмпла. Без этого `Sink::try_seek`/`clear` ждали аудиопоток вечно и вешали синхрон. Плеер создаётся
+  на каждый старт сессии: уничтоженный закрывает свой поток (`AudioEvent::Closed`). Тесты плеера — `--features audio-rodio`.
+- Наушники отключились или звонок в комнате → громкость 0 только здесь (`FocusController`); это «пауза на телефоне»
+  (`playback/PlaybackLogic.kt::mutedHere`, `playingHere`), и любой `Toggle` включает звук, а не ставит паузу всем
+  (`toggleCommands`, перехват в `CoreSession.command`).
 - WebView входа (`auth/LoginScreen.kt`) — с `layoutParams` MATCH_PARENT: с WRAP_CONTENT от `AndroidView` в нём
   `100vh` = 0, и выезжающие меню Яндекса ID (повторная отправка кода) оказываются над экраном. Отладка страницы —
   debug-сборка, `adb forward tcp:9339 localabstract:webview_devtools_remote_<pid>` и CDP на этом порту.

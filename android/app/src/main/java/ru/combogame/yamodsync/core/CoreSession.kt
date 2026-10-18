@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import ru.combogame.yamodsync.playback.toggleCommands
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
@@ -94,6 +95,12 @@ class CoreSession(
     }
 
     fun command(command: RoomCommand) {
+        // Все «играть / пауза» — из приложения, уведомления, наушников — проходят здесь.
+        if (command == RoomCommand.Toggle) return toggleCommands(_snapshot.value).forEach(::send)
+        send(command)
+    }
+
+    private fun send(command: RoomCommand) {
         val current = handle
         if (current == 0L) return
         val json = command.toJson().toString()

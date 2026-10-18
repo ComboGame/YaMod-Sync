@@ -16,7 +16,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use rodio::decoder::DecoderBuilder;
-use rodio::{OutputStreamBuilder, Sink, Source};
+use rodio::mixer::MixerSource;
+use rodio::{OutputStream, OutputStreamBuilder, Sink, Source, cpal};
 use ymsync_proto::TrackRef;
 
 use crate::playback::{AudioSource, Playback};
@@ -38,6 +39,14 @@ pub struct Player {
     /// track it was meant for is still the one playing.
     generation: Arc<AtomicU64>,
     seeker: mpsc::Sender<SeekJob>,
+    /// Tells the audio thread to close the device when the player goes.
+    audio: mpsc::Sender<AudioEvent>,
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        let _ = self.audio.send(AudioEvent::Closed);
+    }
 }
 
 /// A seek into a part of the track that has not downloaded yet.
@@ -48,28 +57,175 @@ struct SeekJob {
     need_bytes: usize,
 }
 
+/// The sink's own mixer output, which whatever device stream is open pulls from.
+///
+/// A device can disappear under a playing track — Bluetooth headphones switched
+/// off, and the phone moves to its speaker. The old stream is then dead and a
+/// new one has to be opened; because the sink is attached to this mixer rather
+/// than to the stream's, the new stream carries on from the same sample, with
+/// the track, its position and any pending seek untouched. Without it the sink
+/// stopped being pulled, and its `try_seek` and `clear` — which wait for the
+/// audio thread — hung the sync loop for good.
+#[derive(Clone)]
+struct SharedOutput {
+    source: Arc<Mutex<MixerSource>>,
+    channels: rodio::ChannelCount,
+    sample_rate: rodio::SampleRate,
+}
+
+impl SharedOutput {
+    fn new(source: MixerSource) -> Self {
+        Self {
+            channels: source.channels(),
+            sample_rate: source.sample_rate(),
+            source: Arc::new(Mutex::new(source)),
+        }
+    }
+
+    /// A source for one device stream to play.
+    fn handle(&self) -> OutputHandle {
+        OutputHandle(self.clone())
+    }
+}
+
+struct OutputHandle(SharedOutput);
+
+impl Iterator for OutputHandle {
+    type Item = f32;
+
+    /// Silence while the sink has nothing: a source that ends is dropped by the
+    /// stream, and the next track would then have nowhere to play.
+    fn next(&mut self) -> Option<f32> {
+        Some(self.0.source.lock().expect("audio mutex").next().unwrap_or(0.0))
+    }
+}
+
+impl Source for OutputHandle {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        self.0.channels
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.0.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+/// What the audio thread hears about its device stream.
+enum AudioEvent {
+    /// The device went away (headphones off); open whichever is current now.
+    Lost,
+    /// The player is gone.
+    Closed,
+}
+
+/// Keeps a device stream open, replacing it when it is lost, until the player
+/// closes. The phone makes a player for every room it joins: one left behind
+/// held its device open for good.
+fn keep_output<S>(
+    first: S,
+    events: &mpsc::Receiver<AudioEvent>,
+    mut open: impl FnMut() -> Result<S, String>,
+    settle: Duration,
+    retry: Duration,
+) {
+    let mut stream = Some(first);
+    while let Ok(AudioEvent::Lost) = events.recv() {
+        // The old stream goes first: two pulling at once would play the track
+        // at double speed.
+        drop(stream.take());
+        std::thread::sleep(settle);
+        // One route change is reported more than once.
+        loop {
+            match events.try_recv() {
+                Ok(AudioEvent::Lost) => continue,
+                Ok(AudioEvent::Closed) => return,
+                Err(_) => break,
+            }
+        }
+        tracing::info!("audio output lost, opening the current one");
+        loop {
+            match open() {
+                Ok(new) => {
+                    stream = Some(new);
+                    break;
+                }
+                Err(err) => {
+                    tracing::warn!("no audio output yet: {err}");
+                    if let Ok(AudioEvent::Closed) = events.recv_timeout(retry) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Opens the default output device and starts it playing `output`. A lost
+/// device is reported on `lost`, for the audio thread to open another.
+fn open_output(output: Option<&SharedOutput>, lost: &mpsc::Sender<AudioEvent>) -> Result<OutputStream, String> {
+    let lost = lost.clone();
+    let mut stream = OutputStreamBuilder::from_default_device()
+        .map_err(|err| err.to_string())?
+        .with_error_callback(move |err| match err {
+            cpal::StreamError::DeviceNotAvailable => {
+                let _ = lost.send(AudioEvent::Lost);
+            }
+            other => tracing::warn!("audio output: {other}"),
+        })
+        .open_stream_or_fallback()
+        .map_err(|err| err.to_string())?;
+    stream.log_on_drop(false);
+    if let Some(output) = output {
+        stream.mixer().add(output.handle());
+    }
+    Ok(stream)
+}
+
+/// How long to let the system settle on its new route before opening it.
+const REOPEN_DELAY: Duration = Duration::from_millis(300);
+
+/// Between attempts while no device will open.
+const REOPEN_RETRY: Duration = Duration::from_secs(1);
+
 impl Player {
     pub fn new(volume: f32) -> Result<Self> {
         // cpal's stream is not `Send` on every platform, so the output device is
-        // opened on its own thread that then parks, keeping the device open for
-        // the life of the process. Only the `Sink` handle crosses threads.
+        // opened on its own thread, which keeps it open while the player lives
+        // and opens a new one when it is lost. Only the `Sink` handle crosses
+        // threads.
         let (tx, rx) = mpsc::channel::<Result<Sink, String>>();
+        let (audio, events) = mpsc::channel::<AudioEvent>();
+        let lost_tx = audio.clone();
         std::thread::Builder::new()
             .name("ymsync-audio".to_string())
-            .spawn(move || match OutputStreamBuilder::open_default_stream() {
-                Err(err) => {
-                    let _ = tx.send(Err(err.to_string()));
-                }
-                Ok(mut stream) => {
-                    stream.log_on_drop(false);
-                    if tx.send(Ok(Sink::connect_new(stream.mixer()))).is_err() {
+            .spawn(move || {
+                let first = match open_output(None, &lost_tx) {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        let _ = tx.send(Err(err));
                         return;
                     }
-                    drop(tx);
-                    loop {
-                        std::thread::park();
-                    }
+                };
+                // The mixer takes the device's format, so the first stream does
+                // not have to convert it.
+                let (mixer, source) =
+                    rodio::mixer::mixer(first.config().channel_count(), first.config().sample_rate());
+                let output = SharedOutput::new(source);
+                first.mixer().add(output.handle());
+                if tx.send(Ok(Sink::connect_new(&mixer))).is_err() {
+                    return;
                 }
+                drop(tx);
+
+                keep_output(first, &events, || open_output(Some(&output), &lost_tx), REOPEN_DELAY, REOPEN_RETRY);
             })
             .context("spawning the audio thread")?;
 
@@ -91,6 +247,7 @@ impl Player {
             stream: Mutex::new(None),
             generation,
             seeker,
+            audio,
         })
     }
 
@@ -284,6 +441,98 @@ mod tests {
     use super::*;
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    /// A source of `n` distinct samples, so a test can tell which one it got.
+    fn numbered(n: usize) -> rodio::buffer::SamplesBuffer {
+        rodio::buffer::SamplesBuffer::new(1, 44_100, (1..=n).map(|i| i as f32).collect::<Vec<_>>())
+    }
+
+    /// The device can go away mid-song (Bluetooth headphones switched off) and a
+    /// new output stream takes over. It must carry on from the very sample the
+    /// old one stopped at, with the sink, its track and its position untouched.
+    #[test]
+    fn a_new_output_continues_where_the_old_one_stopped() {
+        let (mixer, source) = rodio::mixer::mixer(1, 44_100);
+        let output = SharedOutput::new(source);
+        let sink = Sink::connect_new(&mixer);
+        sink.append(numbered(10));
+
+        let mut first = output.handle();
+        // The sink's queue plays a little silence while it picks the track up.
+        let heard: Vec<f32> = first.by_ref().take(10_000).skip_while(|s| *s == 0.0).take(4).collect();
+        drop(first);
+        let mut second = output.handle();
+        let then: Vec<f32> = second.by_ref().take(3).collect();
+
+        assert_eq!(heard, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(then, [5.0, 6.0, 7.0]);
+    }
+
+    /// A stand-in device stream that counts how many are open.
+    struct FakeStream(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for FakeStream {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn fake_device() -> (Arc<std::sync::atomic::AtomicUsize>, Arc<AtomicU64>, impl FnMut() -> Result<FakeStream, String> + Send + 'static) {
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opened = Arc::new(AtomicU64::new(0));
+        let (l, o) = (Arc::clone(&live), Arc::clone(&opened));
+        let open = move || {
+            l.fetch_add(1, Ordering::SeqCst);
+            o.fetch_add(1, Ordering::SeqCst);
+            Ok(FakeStream(Arc::clone(&l)))
+        };
+        (live, opened, open)
+    }
+
+    /// The phone makes a player for every room it joins. One left behind must
+    /// not keep its device open — and reopen it whenever the route changes.
+    #[test]
+    fn a_closed_player_closes_its_output() {
+        let (live, _opened, mut open) = fake_device();
+        let first = open().unwrap();
+        let (events_tx, events) = mpsc::channel();
+        let worker = std::thread::spawn(move || keep_output(first, &events, open, Duration::ZERO, Duration::ZERO));
+        events_tx.send(AudioEvent::Closed).unwrap();
+        worker.join().unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    /// A route change reports the loss more than once; one new stream replaces
+    /// the old, never two playing side by side.
+    #[test]
+    fn a_lost_output_is_replaced_by_a_single_new_stream() {
+        let (live, opened, mut open) = fake_device();
+        let first = open().unwrap();
+        let (events_tx, events) = mpsc::channel();
+        events_tx.send(AudioEvent::Lost).unwrap();
+        events_tx.send(AudioEvent::Lost).unwrap();
+        let worker = std::thread::spawn(move || keep_output(first, &events, open, Duration::from_millis(50), Duration::ZERO));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while opened.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        assert_eq!(opened.load(Ordering::SeqCst), 2);
+        events_tx.send(AudioEvent::Closed).unwrap();
+        worker.join().unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    /// An output stream drops a source that ends. Between tracks the sink has
+    /// nothing to play, and the output must stay attached through that.
+    #[test]
+    fn the_output_plays_silence_rather_than_ending_when_nothing_plays() {
+        let (_mixer, source) = rodio::mixer::mixer(1, 44_100);
+        let output = SharedOutput::new(source);
+        let silence: Vec<f32> = output.handle().take(5).collect();
+        assert_eq!(silence, [0.0; 5]);
+    }
 
     /// The sync loop shares one player across tasks and blocking calls. If a
     /// future `rodio` release makes `Sink` non-shareable, fail here rather than

@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.combogame.yamodsync.core.RoomCommand
 import ru.combogame.yamodsync.core.RoomSnapshot
+import ru.combogame.yamodsync.playback.playingHere
 import ru.combogame.yamodsync.ui.components.Cover
 import ru.combogame.yamodsync.ui.theme.YaTokens
 
@@ -35,7 +36,7 @@ import ru.combogame.yamodsync.ui.theme.YaTokens
 @Composable
 fun MiniPlayer(snapshot: RoomSnapshot?, onCommand: (RoomCommand) -> Unit, onOpen: () -> Unit) {
     val track = snapshot?.track ?: return
-    val playing = snapshot.roomPlaying == true || snapshot.waiting
+    val playing = playingHere(snapshot)
     val duration = snapshot.durationMs.takeIf { it > 0 } ?: track.durationMs
     val progress = if (duration > 0) (snapshot.positionMs.toFloat() / duration).coerceIn(0f, 1f) else 0f
     val shape = RoundedCornerShape(YaTokens.RadiusButton)

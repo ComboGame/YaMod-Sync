@@ -2,6 +2,7 @@ package ru.combogame.yamodsync.ui.player
 
 import ru.combogame.yamodsync.core.LyricLine
 import ru.combogame.yamodsync.core.RoomSnapshot
+import ru.combogame.yamodsync.playback.mutedHere
 import ru.combogame.yamodsync.core.TrackRef
 import ru.combogame.yamodsync.core.isPlainWave
 import ru.combogame.yamodsync.core.parseStation
@@ -38,6 +39,7 @@ fun syncLine(s: RoomSnapshot, inRoom: Boolean): SyncLine? {
         s.waiting -> SyncLine(SyncTone.Idle, "Ждём, пока трек загрузится у всех")
         s.roomPlaying == null -> SyncLine(SyncTone.Catching, "Узнаю, что играет в комнате")
         s.roomPlaying == false -> SyncLine(SyncTone.Idle, "Пауза у всех")
+        s.mutedHere -> SyncLine(SyncTone.Idle, "Здесь на паузе, комната играет дальше")
         s.loading -> SyncLine(SyncTone.Catching, "Загружаю трек")
         s.localTrack != null && s.localTrack != track.trackId -> SyncLine(SyncTone.Catching, "Ставлю трек комнаты")
         drift == null -> SyncLine(SyncTone.Catching, "Выравниваю позицию")

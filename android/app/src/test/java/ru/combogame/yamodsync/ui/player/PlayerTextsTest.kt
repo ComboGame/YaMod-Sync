@@ -47,6 +47,11 @@ class PlayerTextsTest {
     }
 
     @Test
+    fun headphonesGoneItSaysThePhoneIsPausedAlone() {
+        assertEquals("Здесь на паузе, комната играет дальше", syncLine(playing.copy(driftMs = 38, volume = 0f), inRoom = true)?.text)
+    }
+
+    @Test
     fun farOffItIsCatchingUp() {
         val line = syncLine(playing.copy(driftMs = 640), inRoom = true)
         assertEquals("Догоняю комнату · 640 мс", line?.text)

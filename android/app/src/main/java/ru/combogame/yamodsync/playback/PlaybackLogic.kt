@@ -22,6 +22,24 @@ data class PlayerView(
     val liked: Boolean,
 )
 
+/**
+ * Звук выключен только на этом телефоне: в комнате отключились наушники или идёт
+ * звонок (см. [focusAction]). Комната играет дальше, а здесь это пауза.
+ */
+val RoomSnapshot.mutedHere: Boolean get() = volume == 0f
+
+/** Играет ли для этого телефона — что показывают кнопки и уведомление. */
+fun playingHere(s: RoomSnapshot?): Boolean = s != null && (s.roomPlaying == true || s.waiting) && !s.mutedHere
+
+/**
+ * «Играть / пауза». На телефоне, где звук выключен только здесь, это «играть»:
+ * звук включается с позиции комнаты, а пауза всем не ставится. Иначе он остался бы
+ * немым — вернуть звук было нечем.
+ */
+fun toggleCommands(s: RoomSnapshot?): List<RoomCommand> =
+    if (s?.mutedHere == true) listOfNotNull(RoomCommand.Volume(1f), RoomCommand.Toggle.takeIf { s.roomPlaying == false })
+    else listOf(RoomCommand.Toggle)
+
 fun playerViewOf(snapshot: RoomSnapshot?): PlayerView {
     val track = snapshot?.track
     return PlayerView(
@@ -33,7 +51,7 @@ fun playerViewOf(snapshot: RoomSnapshot?): PlayerView {
         artworkUrl = coverUrl(track?.coverUri),
         durationMs = snapshot?.durationMs?.takeIf { it > 0 } ?: track?.durationMs ?: 0,
         positionMs = snapshot?.positionMs ?: 0,
-        playWhenReady = track != null && (snapshot.roomPlaying == true || snapshot.waiting),
+        playWhenReady = track != null && playingHere(snapshot),
         buffering = track != null && (snapshot.loading || snapshot.waiting),
         liked = snapshot?.trackLiked == true,
     )

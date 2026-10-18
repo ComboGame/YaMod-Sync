@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import ru.combogame.yamodsync.core.PLAIN_WAVE_SEED
 import ru.combogame.yamodsync.core.RoomCommand
 import ru.combogame.yamodsync.core.RoomSnapshot
+import ru.combogame.yamodsync.playback.mutedHere
 import ru.combogame.yamodsync.core.WavePreset
 import ru.combogame.yamodsync.core.isPlainWave
 import ru.combogame.yamodsync.core.parseStation
@@ -32,7 +33,7 @@ fun HomeScreen(snapshot: RoomSnapshot?, presets: List<WavePreset>?, inRoom: Bool
     val plain = station == null || isPlainWave(station)
     val owner = waveOwner(snapshot)
     val unfed = snapshot?.stationUnfed == true
-    val view = waveHeroView(station, owner, snapshot?.roomPlaying == true, unfed, plain, inRoom)
+    val view = waveHeroView(station, owner, snapshot?.roomPlaying == true && !snapshot.mutedHere, unfed, plain, inRoom)
     val current = if (station == null || plain) null else presets?.firstOrNull { it.seeds == station.seeds }?.id
 
     fun guarded(command: RoomCommand) {

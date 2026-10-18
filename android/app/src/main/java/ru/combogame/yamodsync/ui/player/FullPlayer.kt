@@ -65,6 +65,7 @@ import kotlinx.coroutines.delay
 import ru.combogame.yamodsync.core.Lyrics
 import ru.combogame.yamodsync.core.RoomCommand
 import ru.combogame.yamodsync.core.RoomSnapshot
+import ru.combogame.yamodsync.playback.mutedHere
 import ru.combogame.yamodsync.core.WavePreset
 import ru.combogame.yamodsync.playback.coverUrl
 import ru.combogame.yamodsync.playback.dislikeCommands
@@ -110,7 +111,7 @@ fun FullPlayer(
     // Ядро присылает позицию 4 раза в секунду; между снапшотами она досчитывается здесь.
     var seen by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(s.positionMs, s.track?.trackId, s.roomPlaying) { seen = System.currentTimeMillis() }
-    val playing = s.roomPlaying == true && !s.waiting
+    val playing = s.roomPlaying == true && !s.waiting && !s.mutedHere
     val duration = s.durationMs.takeIf { it > 0 } ?: track?.durationMs ?: 0
     fun livePosition(): Long {
         val ahead = if (playing) System.currentTimeMillis() - seen else 0

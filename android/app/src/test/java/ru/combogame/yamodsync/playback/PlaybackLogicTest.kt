@@ -104,3 +104,37 @@ class ReconnectingNotificationTest {
         assertEquals("Артист", playerViewOf(RoomSnapshot(track = track, status = "connected")).artist)
     }
 }
+
+class MutedHereTest {
+    private val track = TrackRef("7", "70", title = "Трек", artist = "Артист")
+
+    /** Наушники отключились в комнате: комната играет дальше, а этот телефон — на паузе. */
+    @Test
+    fun aPhoneMutedInARoomShowsPaused() {
+        val muted = RoomSnapshot(track = track, roomPlaying = true, volume = 0f)
+        assertFalse(playingHere(muted))
+        assertFalse(playerViewOf(muted).playWhenReady)
+        assertTrue(playingHere(muted.copy(volume = 1f)))
+    }
+
+    /** «Играть» на таком телефоне включает звук здесь, а не ставит паузу всем. */
+    @Test
+    fun playOnAMutedPhoneUnmutesItInsteadOfPausingTheRoom() {
+        assertEquals(listOf(RoomCommand.Volume(1f)), toggleCommands(RoomSnapshot(track = track, roomPlaying = true, volume = 0f)))
+    }
+
+    /** Комнату за это время поставили на паузу: звук включается, и комната продолжает. */
+    @Test
+    fun playOnAMutedPhoneInAPausedRoomAlsoResumesIt() {
+        assertEquals(
+            listOf(RoomCommand.Volume(1f), RoomCommand.Toggle),
+            toggleCommands(RoomSnapshot(track = track, roomPlaying = false, volume = 0f)),
+        )
+    }
+
+    @Test
+    fun anAudiblePhoneTogglesTheRoom() {
+        assertEquals(listOf(RoomCommand.Toggle), toggleCommands(RoomSnapshot(track = track, roomPlaying = true)))
+        assertEquals(listOf(RoomCommand.Toggle), toggleCommands(null))
+    }
+}
