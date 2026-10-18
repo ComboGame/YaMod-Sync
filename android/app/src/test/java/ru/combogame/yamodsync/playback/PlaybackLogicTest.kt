@@ -87,3 +87,20 @@ class LikeCommandsTest {
         assertEquals(listOf(RoomCommand.WaveFeedback("dislike", "7"), RoomCommand.Next), dislikeCommands(RoomSnapshot(track = track, feeding = true)))
     }
 }
+
+class ReconnectingNotificationTest {
+    private val track = TrackRef("7", "70", title = "Трек", artist = "Артист")
+
+    /** Связь пропала посреди трека: экран блокировки говорит об этом, а не молчит. */
+    @Test
+    fun aLostConnectionIsSaidUnderTheTitle() {
+        val view = playerViewOf(RoomSnapshot(track = track, status = "reconnecting"))
+        assertEquals("Трек", view.title)
+        assertEquals("Переподключаюсь… · Артист", view.artist)
+    }
+
+    @Test
+    fun connectedShowsTheArtist() {
+        assertEquals("Артист", playerViewOf(RoomSnapshot(track = track, status = "connected")).artist)
+    }
+}

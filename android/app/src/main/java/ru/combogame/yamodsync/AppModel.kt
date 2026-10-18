@@ -23,6 +23,8 @@ import ru.combogame.yamodsync.settings.AppSettings
 import ru.combogame.yamodsync.settings.SettingsStore
 import kotlinx.serialization.builtins.ListSerializer
 
+private const val RECHECK_MS = 10 * 60 * 1000L
+
 /**
  * Всё, что живёт дольше экрана: вход, сессия ядра и то, к какой комнате она
  * подключена. Экраны только читают отсюда и зовут действия.
@@ -67,7 +69,23 @@ class AppModel(
         }
     }
 
+    private var checkedAt = 0L
+
+    /**
+     * Проверить вход ещё раз, когда окно снова на экране (не чаще раза в 10 минут):
+     * отозванный или истёкший токен возвращает на экран входа, а не оставляет
+     * приложение молча без треков.
+     */
+    fun recheckLogin() {
+        if (_login.value !is LoginState.SignedIn || System.currentTimeMillis() - checkedAt < RECHECK_MS) return
+        scope.launch {
+            check()
+            if (_login.value is LoginState.SignedOut) session.stop()
+        }
+    }
+
     private suspend fun check() {
+        checkedAt = System.currentTimeMillis()
         val reply = withContext(Dispatchers.IO) { native.account(token) }
         _login.value = loginStateFor(reply, _login.value)
         if (_login.value is LoginState.SignedOut) {

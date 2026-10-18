@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
         // остановилась бы вместе с экраном.
         val token = androidx.media3.session.SessionToken(this, android.content.ComponentName(this, ru.combogame.yamodsync.playback.PlaybackService::class.java))
         controller = androidx.media3.session.MediaController.Builder(this, token).buildAsync()
+        (application as YaModSyncApp).model.recheckLogin()
     }
 
     override fun onStop() {

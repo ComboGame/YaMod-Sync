@@ -28,7 +28,8 @@ fun playerViewOf(snapshot: RoomSnapshot?): PlayerView {
         hasTrack = track != null,
         trackId = track?.trackId,
         title = track?.title.orEmpty(),
-        artist = track?.artist.orEmpty(),
+        // Связь с комнатой пропала — сказать об этом там, куда смотрят с выключенным экраном.
+        artist = if (snapshot?.status == "reconnecting") listOfNotNull("Переподключаюсь…", track?.artist?.ifBlank { null }).joinToString(" · ") else track?.artist.orEmpty(),
         artworkUrl = coverUrl(track?.coverUri),
         durationMs = snapshot?.durationMs?.takeIf { it > 0 } ?: track?.durationMs ?: 0,
         positionMs = snapshot?.positionMs ?: 0,
