@@ -22,6 +22,7 @@ import ru.combogame.yamodsync.core.RoomConfig
 import ru.combogame.yamodsync.core.RoomListing
 import ru.combogame.yamodsync.settings.AppSettings
 import ru.combogame.yamodsync.ui.room.RoomScreen
+import ru.combogame.yamodsync.update.UpdateSection
 import ru.combogame.yamodsync.core.LyricLine
 import ru.combogame.yamodsync.core.Lyrics
 import ru.combogame.yamodsync.core.RoomCommand
@@ -57,7 +58,11 @@ class ShowcaseActivity : ComponentActivity() {
                         onChange = { settings = it(settings) },
                         onSignOut = {},
                         onClose = {},
-                    ) { Text("Обновлений нет", color = MaterialTheme.colorScheme.onBackground) }
+                    ) {
+                        val updates = (application as ru.combogame.yamodsync.YaModSyncApp).updates
+                        val update by updates.state.collectAsState()
+                        UpdateSection(update, updates.current, onCheck = updates::check, onInstall = updates::install)
+                    }
                     else -> Showcase(screen)
                 }
             }

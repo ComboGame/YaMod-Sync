@@ -22,6 +22,9 @@ import ru.combogame.yamodsync.ui.home.HomeScreen
 import ru.combogame.yamodsync.ui.player.FullPlayer
 import ru.combogame.yamodsync.ui.room.RoomScreen
 import ru.combogame.yamodsync.ui.settings.SettingsScreen
+import ru.combogame.yamodsync.update.UpdateBanner
+import ru.combogame.yamodsync.update.UpdateModel
+import ru.combogame.yamodsync.update.UpdateSection
 import androidx.compose.ui.graphics.Color
 import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.shell.Tab
@@ -65,7 +68,7 @@ class MainActivity : ComponentActivity() {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                     }
                     is LoginState.SignedOut -> LoginScreen(reason = state.reason, onToken = model::signIn)
-                    is LoginState.SignedIn -> SignedIn(model)
+                    is LoginState.SignedIn -> SignedIn(model, (application as YaModSyncApp).updates)
                 }
             }
         }
@@ -76,7 +79,8 @@ class MainActivity : ComponentActivity() {
 enum class Screen { Shell, Player, Settings }
 
 @androidx.compose.runtime.Composable
-private fun SignedIn(model: AppModel) {
+private fun SignedIn(model: AppModel, updates: UpdateModel) {
+    val update by updates.state.collectAsStateWithLifecycle()
     var screen by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(Screen.Shell) }
     val snapshot by model.session.snapshot.collectAsStateWithLifecycle()
     val room by model.room.collectAsStateWithLifecycle()
@@ -105,7 +109,10 @@ private fun SignedIn(model: AppModel) {
             onOpenSettings = { screen = Screen.Settings },
         ) { tab, _ ->
             when (tab) {
-                Tab.Home -> HomeScreen(snapshot, presets, model.session::command)
+                Tab.Home -> androidx.compose.foundation.layout.Column {
+                    UpdateBanner(update) { screen = Screen.Settings }
+                    HomeScreen(snapshot, presets, model.session::command)
+                }
                 Tab.Collection -> CollectionScreen(snapshot, likes, model.session::command)
                 Tab.Room -> RoomScreen(
                     snapshot = snapshot,
@@ -139,7 +146,7 @@ private fun SignedIn(model: AppModel) {
             },
             onClose = { screen = Screen.Shell },
         ) {
-            Text("Проверка обновлений появится в следующей версии", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground)
+            UpdateSection(update, updates.current, onCheck = updates::check, onInstall = updates::install)
         }
     }
 }
