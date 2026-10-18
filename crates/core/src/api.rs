@@ -521,6 +521,20 @@ impl YandexMusic {
         Ok(())
     }
 
+    /// The presets of «Моя волна» — the wheel on the app's main page, which the
+    /// phone shows as a carousel. Picked for this account by Yandex, so they
+    /// change from one call to the next.
+    pub async fn wave_presets(&self) -> Result<Vec<WavePreset>> {
+        let url = self.url("/wheel/new");
+        // An empty JSON object, not an empty body: without a body the endpoint
+        // answers 415, with an empty one 400.
+        let body = self
+            .send(self.authorized(self.http.post(&url)).json(&serde_json::json!({})), &url)
+            .await
+            .context("режимы «Моей волны»")?;
+        parse_wheel(&body)
+    }
+
     /// Resolves a playable, signed URL for the track's audio.
     pub async fn stream_url(&self, track_id: &str) -> Result<String> {
         let variants: Vec<DownloadInfo> = self
@@ -1226,6 +1240,99 @@ impl StreamSpec {
     }
 }
 
+/// One preset of «Моя волна», as the wheel offers it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WavePreset {
+    /// The wheel's id for it, the seeds joined: `genre:allrock`,
+    /// `user:onyourwave` (the app's «Назад к привычному»), `diversity:reshuffle`.
+    pub id: String,
+    pub title: String,
+    /// The line above the title, «В стиле артиста»; most presets have none.
+    pub description: Option<String>,
+    /// What a wave session for it is opened with.
+    pub seeds: Vec<String>,
+    /// A cover template, `…/%%`, for presets that have a picture.
+    pub cover_uri: Option<String>,
+    /// The colour the app tints the preset with, `#F66880`.
+    pub color: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Wheel {
+    #[serde(default)]
+    items: Vec<WheelItem>,
+}
+
+#[derive(Deserialize)]
+struct WheelItem {
+    #[serde(default)]
+    id: String,
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    data: Option<WheelData>,
+}
+
+#[derive(Deserialize)]
+struct WheelData {
+    wave: Option<WheelWave>,
+    agent: Option<WheelAgent>,
+}
+
+#[derive(Deserialize)]
+struct WheelWave {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    seeds: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct WheelAgent {
+    cover: Option<WheelCover>,
+}
+
+#[derive(Deserialize)]
+struct WheelCover {
+    uri: Option<String>,
+    color: Option<String>,
+}
+
+/// Reads the wheel. Only its waves: the app also puts albums, promos and
+/// settings on it, none of which is a preset to start.
+pub fn parse_wheel(body: &str) -> Result<Vec<WavePreset>> {
+    let mut document: serde_json::Value =
+        serde_json::from_str(body).with_context(|| format!("колесо волны — не JSON: {}", excerpt(body)))?;
+    if let Some(result) = document.get_mut("result").map(serde_json::Value::take) {
+        document = result;
+    }
+    let wheel: Wheel = serde_json::from_value(document)
+        .with_context(|| format!("неожиданная структура колеса волны: {}", excerpt(body)))?;
+    Ok(wheel
+        .items
+        .into_iter()
+        .filter(|item| item.kind.eq_ignore_ascii_case("wave"))
+        .filter_map(|item| {
+            let data = item.data?;
+            let wave = data.wave?;
+            if wave.seeds.is_empty() || wave.name.is_empty() {
+                return None;
+            }
+            let cover = data.agent.and_then(|agent| agent.cover);
+            Some(WavePreset {
+                id: item.id,
+                title: wave.name,
+                description: item.description.filter(|d| !d.trim().is_empty()),
+                seeds: wave.seeds,
+                cover_uri: cover.as_ref().and_then(|c| c.uri.clone()),
+                color: cover.and_then(|c| c.color),
+            })
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountStatus {
@@ -1724,6 +1831,36 @@ pub fn parse_playlist_ref(raw: &str) -> Result<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `POST /wheel/new`, as the desktop app's main page asks for it: the
+    /// presets of «Моя волна», the same ones its wheel shows.
+    const WHEEL: &str = include_str!("../tests/fixtures/wheel-new.json");
+
+    #[test]
+    fn the_wheel_is_read_from_its_landing_block() {
+        let presets = parse_wheel(WHEEL).expect("wheel");
+        assert!(presets.len() >= 5, "{presets:?}");
+        for preset in &presets {
+            assert!(!preset.title.is_empty(), "{preset:?}");
+            assert!(!preset.seeds.is_empty(), "{preset:?}");
+        }
+        assert_eq!(presets[0].id, "artist:1000001");
+        assert_eq!(presets[0].title, "Артист");
+        assert_eq!(presets[0].description.as_deref(), Some("В стиле артиста"));
+        assert_eq!(presets[0].seeds, ["artist:1000001"]);
+        assert_eq!(presets[0].color.as_deref(), Some("#F66880"));
+        assert!(presets[0].cover_uri.as_deref().is_some_and(|uri| uri.ends_with("%%")));
+        let usual = presets.iter().find(|p| p.id == "user:onyourwave").expect("back to usual");
+        assert_eq!(usual.description, None, "no line under it in the app either");
+    }
+
+    /// Other endpoints wrap their answer in `result`; this one did not when it
+    /// was looked at. Either shape reads the same.
+    #[test]
+    fn a_wrapped_wheel_reads_the_same() {
+        let wrapped = format!(r#"{{"result": {WHEEL}}}"#);
+        assert_eq!(parse_wheel(&wrapped).unwrap(), parse_wheel(WHEEL).unwrap());
+    }
 
     #[test]
     fn signed_url_has_the_expected_shape() {
