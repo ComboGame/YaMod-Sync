@@ -43,6 +43,37 @@ pub struct YandexMusic {
     /// This account's numeric id, asked for once. Every «Мне нравится» call needs
     /// it, and it cannot change under a fixed token.
     uid: tokio::sync::OnceCell<i64>,
+    /// Which of a track's variants [`Self::stream_url`] resolves.
+    quality: Quality,
+}
+
+/// How a track is fetched when this client resolves it: the best MP3 Yandex
+/// offers, or the lightest, to spare a phone's data plan.
+///
+/// There is no lossless here on purpose: Yandex hands FLAC only through a
+/// request signed with a key built into its own apps, and encrypted at that.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quality {
+    #[default]
+    High,
+    Economy,
+}
+
+/// The variant to play at `quality`: never a preview, MP3 when there is one
+/// (it is what the signed `get-mp3` path serves), otherwise whatever is left.
+fn pick_variant(variants: &[DownloadInfo], quality: Quality) -> Option<&DownloadInfo> {
+    let playable: Vec<&DownloadInfo> = variants.iter().filter(|v| !v.preview).collect();
+    let mp3: Vec<&DownloadInfo> = playable
+        .iter()
+        .copied()
+        .filter(|v| v.codec.eq_ignore_ascii_case("mp3"))
+        .collect();
+    let pool = if mp3.is_empty() { playable } else { mp3 };
+    match quality {
+        Quality::High => pool.into_iter().max_by_key(|v| v.bitrate_in_kbps),
+        Quality::Economy => pool.into_iter().min_by_key(|v| v.bitrate_in_kbps),
+    }
 }
 
 /// The platform TLS stack (schannel on Windows) needs no help.
@@ -91,7 +122,14 @@ impl YandexMusic {
             token: token.into(),
             base: base.into().trim_end_matches('/').to_string(),
             uid: tokio::sync::OnceCell::new(),
+            quality: Quality::High,
         })
+    }
+
+    /// The same client, resolving tracks at `quality`.
+    pub fn with_quality(mut self, quality: Quality) -> Self {
+        self.quality = quality;
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -542,21 +580,12 @@ impl YandexMusic {
             .await
             .with_context(|| format!("requesting download info for track {track_id}"))?;
 
-        let playable: Vec<&DownloadInfo> = variants.iter().filter(|v| !v.preview).collect();
-        if playable.is_empty() {
+        let Some(best) = pick_variant(&variants, self.quality) else {
             bail!(
                 "для трека {track_id} нет доступных вариантов загрузки — обычно это \
                  региональное или лицензионное ограничение на этом аккаунте"
             );
-        }
-        // Prefer MP3: it is what the signed `get-mp3` path serves, and rodio
-        // decodes it without extra containers.
-        let best = playable
-            .iter()
-            .filter(|v| v.codec.eq_ignore_ascii_case("mp3"))
-            .max_by_key(|v| v.bitrate_in_kbps)
-            .or_else(|| playable.iter().max_by_key(|v| v.bitrate_in_kbps))
-            .expect("playable is not empty");
+        };
 
         let spec = self.stream_spec(&best.download_info_url).await?;
         Ok(spec.to_signed_url())
@@ -1852,6 +1881,43 @@ mod tests {
         assert!(presets[0].cover_uri.as_deref().is_some_and(|uri| uri.ends_with("%%")));
         let usual = presets.iter().find(|p| p.id == "user:onyourwave").expect("back to usual");
         assert_eq!(usual.description, None, "no line under it in the app either");
+    }
+
+    fn variant(codec: &str, kbps: u32, preview: bool) -> DownloadInfo {
+        DownloadInfo {
+            codec: codec.into(),
+            bitrate_in_kbps: kbps,
+            preview,
+            download_info_url: format!("https://storage/{codec}-{kbps}"),
+        }
+    }
+
+    #[test]
+    fn high_quality_picks_the_best_mp3_and_economy_the_lightest() {
+        let variants = [
+            variant("mp3", 192, false),
+            variant("mp3", 320, false),
+            variant("aac", 256, false),
+            variant("mp3", 128, false),
+            variant("mp3", 320, true),
+        ];
+        assert_eq!(pick_variant(&variants, Quality::High).unwrap().bitrate_in_kbps, 320);
+        let light = pick_variant(&variants, Quality::Economy).unwrap();
+        assert_eq!((light.codec.as_str(), light.bitrate_in_kbps), ("mp3", 128));
+    }
+
+    #[test]
+    fn a_preview_is_never_what_plays_and_another_codec_stands_in_for_mp3() {
+        assert!(pick_variant(&[variant("mp3", 320, true)], Quality::High).is_none());
+        let only_aac = [variant("aac", 64, false), variant("aac", 256, false)];
+        assert_eq!(pick_variant(&only_aac, Quality::High).unwrap().bitrate_in_kbps, 256);
+        assert_eq!(pick_variant(&only_aac, Quality::Economy).unwrap().bitrate_in_kbps, 64);
+    }
+
+    #[test]
+    fn quality_is_written_the_way_the_phone_sends_it() {
+        assert_eq!(serde_json::from_str::<Quality>(r#""economy""#).unwrap(), Quality::Economy);
+        assert_eq!(Quality::default(), Quality::High);
     }
 
     /// Other endpoints wrap their answer in `result`; this one did not when it
