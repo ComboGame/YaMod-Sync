@@ -1,0 +1,8 @@
+.gradle/
+build/
+local.properties
+# Signing: written by CI from secrets, or kept by hand next to the key.
+keystore.properties
+*.jks
+*.keystore
+.kotlin/

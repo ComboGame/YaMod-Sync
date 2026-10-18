@@ -79,6 +79,15 @@ Android (`android/`, `crates/android/`; план — `docs/superpowers/plans/202
   install <пакет>` (`sdkmanager` в новых cmdline-tools заменён «Android CLI»).
 - Rust-таргеты Android — в тулчейне 1.99.1; `cargo-ndk` 4.x. `adb` — из `%ANDROID_HOME%\platform-tools` (в `C:\adb`
   лежит старый).
+- Сборка (PowerShell; `JAVA_HOME` — JDK 17+, на машине Zulu 21):
+  ```powershell
+  cargo +1.99.1 ndk -t arm64-v8a -t armeabi-v7a -t x86_64 --platform 26 -o crates/android/jniLibs build --release -p ymsync-android
+  cd android; .\gradlew.bat testDebugUnitTest assembleDebug     # APK: app/build/outputs/apk/debug/app-debug.apk
+  & "$env:ANDROID_HOME\emulator\emulator.exe" -avd ymsync-test -no-window -no-audio   # эмулятор без окна
+  adb install -r app\build\outputs\apk\debug\app-debug.apk; adb logcat -s ymsync   # лог ядра — тег ymsync
+  ```
+- AGP 9: Kotlin встроен (плагина `kotlin-android` нет), Compose-компилятор — плагин той же версии, что Kotlin.
+  Версии — `android/gradle/libs.versions.toml`, версия приложения — `android/version.properties`.
 
 ## Синхрон
 
