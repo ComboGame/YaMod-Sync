@@ -1,0 +1,60 @@
+<style>
+  .phones { display: flex; gap: 26px; flex-wrap: wrap; justify-content: center; }
+  .phone-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .phone { width: 250px; height: 540px; border-radius: 30px; border: 6px solid #25262b; color: #b0bac5;
+           font-family: Inter, system-ui, sans-serif; font-size: 11px; position: relative; overflow: hidden; display: flex; flex-direction: column;
+           background: radial-gradient(120% 60% at 50% 30%, rgba(79,156,255,.35), rgba(27,217,106,.08) 55%, #000 85%), #000; }
+  .st { height: 18px; display: flex; justify-content: space-between; padding: 5px 16px 0; font-size: 9px; color: #b0bac5; }
+  .head { display: flex; align-items: center; padding: 12px 14px 0; gap: 12px; }
+  .head .ic { color: #fff; font-size: 16px; width: 18px; text-align: center; }
+  .head .src { flex: 1; line-height: 1.3; } .head .src b { color: #fff; font-weight: 500; display: block; font-size: 11.5px; }
+  .art { width: 218px; height: 218px; border-radius: 16px; margin: 18px auto 0; background: linear-gradient(135deg,#9fc3ff,#e8eef8 50%,#c2410c);
+         box-shadow: 0 18px 40px rgba(0,0,0,.55); }
+  .meta { display: flex; align-items: center; padding: 18px 16px 0; gap: 10px; }
+  .meta div { flex: 1; min-width: 0; } .meta b { color: #fff; font-size: 16px; font-weight: 700; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta .e { border: 1px solid #96a2b0; border-radius: 3px; font-size: 7.5px; padding: 0 2px; margin-right: 4px; }
+  .meta .like { color: #1bd96a; font-size: 18px; }
+  .prog { margin: 18px 16px 0; height: 4px; border-radius: 4px; background: rgba(255,255,255,.18); position: relative; }
+  .prog i { position: absolute; left: 0; top: 0; height: 4px; width: 38%; background: #1bd96a; border-radius: 4px; }
+  .prog s { position: absolute; left: 38%; top: -5px; width: 14px; height: 14px; border-radius: 99px; background: #fff; transform: translateX(-7px); }
+  .times { display: flex; justify-content: space-between; margin: 7px 16px 0; font-size: 9px; color: #96a2b0; }
+  .ctr { display: flex; justify-content: space-between; align-items: center; margin: 12px 14px 0; color: #fff; font-size: 16px; }
+  .ctr .tog { width: 34px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: #b0bac5; }
+  .ctr .tog.on { background: rgba(27,217,106,.18); color: #1bd96a; }
+  .ctr .big { width: 58px; height: 58px; border-radius: 99px; background: #1bd96a; color: #000; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+  .sync { display: flex; align-items: center; justify-content: center; gap: 5px; margin-top: 12px; font-size: 9.5px; color: #1bd96a; }
+  .sync .dot { width: 6px; height: 6px; border-radius: 99px; background: #1bd96a; }
+  .spacer { flex: 1; }
+  .tools { display: flex; justify-content: space-around; padding: 0 10px 16px; color: #fff; font-size: 13px; }
+  .tools span { display: flex; flex-direction: column; align-items: center; gap: 3px; } .tools em { font-style: normal; font-size: 7.5px; color: #96a2b0; }
+  .note { max-width: 380px; font-size: 13px; line-height: 1.5; }
+  .note li { margin-bottom: 6px; }
+</style>
+
+<h2>Полный плеер — без подписей под нижними кнопками</h2>
+<p class="subtitle">Расположение кнопок то же, оформление наше: чёрный фон с отсветом от обложки, зелёный акцент, скругления как в Modrinth.</p>
+
+<div class="phones">
+  <div class="phone-wrap">
+    <div class="phone">
+      <div class="st"><span>07:52</span><span>▮▮ 57%</span></div>
+      <div class="head"><span class="ic">⌄</span><div class="src">Сейчас играет<b>Волна комнаты «дом»</b></div><span class="ic">↗</span></div>
+      <div class="art"></div>
+      <div class="meta"><div><b>ИНДИКАТОР (feat. GONE.Fludd, IROH)</b><span class="e">E</span>I GO! feat. GONE.Fludd, IROH, CAKEBOY</div><span class="like">♥</span></div>
+      <div class="prog"><i></i><s></s></div>
+      <div class="times"><span>01:08</span><span>02:59</span></div>
+      <div class="ctr"><span class="tog on">⟳</span><span>⏮</span><span class="big">❚❚</span><span>⏭</span><span class="tog">⤨</span></div>
+      <div class="sync"><span class="dot"></span>В синхроне с комнатой · 38 мс</div>
+      <div class="spacer"></div>
+      <div class="tools"><span>Тт</span><span>⚙</span><span>☰</span><span>⋮</span></div>
+    </div>
+  </div>
+  <ul class="note">
+    <li><b>Сверху:</b> свернуть, что играет (волна комнаты или «Мне нравится»), поделиться ссылкой на трек.</li>
+    <li><b>Обложка</b> крупно, фон подсвечивается её цветами.</li>
+    <li><b>Название и артист</b> бегущей строкой, справа лайк — сразу в «Мне нравится».</li>
+    <li><b>Ряд кнопок:</b> повтор, назад, пауза, вперёд, перемешать. В комнате повтор и перемешивание общие для всех, как на ПК.</li>
+    <li><b>Под кнопками</b> — синхрон с комнатой; без комнаты строки нет.</li>
+    <li><b>Снизу:</b> текст песни, режим волны (колесо режимов), очередь, «Ещё» (не нравится, к артисту, к альбому).</li>
+  </ul>
+</div>

@@ -1,0 +1,131 @@
+<style>
+  .phones { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
+  .phone-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .phone { width: 220px; height: 470px; border-radius: 28px; border: 6px solid #25262b; background: #000; color: #b0bac5;
+           font-family: Inter, system-ui, sans-serif; font-size: 10.5px; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+  .st { height: 16px; display: flex; justify-content: space-between; padding: 4px 13px 0; font-size: 8.5px; color: #96a2b0; }
+  .top { display: flex; align-items: center; justify-content: space-between; padding: 6px 11px 4px; gap: 6px; }
+  .title { color: #fff; font-weight: 700; font-size: 16px; }
+  .pill { border: 1px solid rgba(27,217,106,.4); color: #fff; border-radius: 99px; padding: 3px 7px; font-size: 8.5px; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .pill.off { border-color: #25262b; color: #96a2b0; }
+  .dot { width: 6px; height: 6px; border-radius: 99px; background: #1bd96a; }
+  .ava { width: 22px; height: 22px; border-radius: 99px; background: #c084fc; color: #000; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 10px; flex-shrink: 0; }
+  .wave { margin: 6px 11px; border-radius: 16px; border: 1px solid #25262b; height: 190px; position: relative; overflow: hidden;
+          background: radial-gradient(circle at 50% 42%, rgba(27,217,106,.6), rgba(27,217,106,.1) 42%, #000 70%); display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .wave b { color: #fff; font-size: 24px; letter-spacing: -.5px; }
+  .wave span { color: #1bd96a; font-size: 8.5px; margin-bottom: 4px; }
+  .play { width: 40px; height: 40px; border-radius: 99px; background: #1bd96a; color: #000; display: flex; align-items: center; justify-content: center; margin-top: 10px; font-size: 14px; }
+  .tune { position: absolute; bottom: 8px; right: 8px; font-size: 8.5px; color: #fff; background: rgba(0,0,0,.5); border: 1px solid #303138; border-radius: 99px; padding: 3px 7px; }
+  .h { color: #fff; font-weight: 600; font-size: 11.5px; padding: 9px 11px 5px; display: flex; justify-content: space-between; }
+  .h em { font-style: normal; color: #96a2b0; font-weight: 400; font-size: 9px; }
+  .carousel { display: flex; gap: 6px; padding: 0 11px; overflow: hidden; }
+  .preset { flex-shrink: 0; width: 66px; border-radius: 12px; background: #16181c; border: 1px solid #25262b; padding: 6px; color: #fff; font-size: 8.5px; line-height: 1.2; }
+  .preset i { display: block; width: 100%; height: 38px; border-radius: 8px; margin-bottom: 4px; }
+  .row { display: flex; align-items: center; gap: 7px; padding: 4px 11px; }
+  .cov { width: 28px; height: 28px; border-radius: 6px; background: #303138; flex-shrink: 0; }
+  .row div { line-height: 1.25; min-width: 0; } .row b { color: #fff; font-weight: 500; display: block; font-size: 10px; }
+  .heart { margin-left: auto; color: #1bd96a; font-size: 11px; }
+  .spacer { flex: 1; }
+  .mini { margin: 0 7px 5px; border-radius: 12px; background: #16181c; border: 1px solid #25262b; padding: 6px 7px; display: flex; align-items: center; gap: 7px; }
+  .mini b { color: #fff; font-weight: 600; display: block; font-size: 9.5px; }
+  .mini .p { margin-left: auto; width: 22px; height: 22px; border-radius: 99px; background: #1bd96a; color: #000; display: flex; align-items: center; justify-content: center; font-size: 8px; flex-shrink: 0; }
+  .bar { height: 2px; background: #303138; margin: 0 7px 5px; border-radius: 2px; position: relative; top: -7px; }
+  .bar i { display: block; height: 2px; width: 35%; background: #1bd96a; border-radius: 2px; }
+  .tabs { display: flex; border-top: 1px solid #1b1b20; padding: 6px 2px 9px; }
+  .tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 8px; color: #96a2b0; }
+  .tab i { width: 18px; height: 18px; border-radius: 6px; background: #25262b; display: block; }
+  .tab.on { color: #1bd96a; } .tab.on i { background: rgba(27,217,106,.28); }
+  .seg { display: flex; gap: 5px; padding: 2px 11px 6px; }
+  .seg span { border-radius: 99px; padding: 4px 8px; font-size: 8.5px; background: #16181c; border: 1px solid #25262b; color: #b0bac5; }
+  .seg span.on { background: rgba(27,217,106,.15); border-color: rgba(27,217,106,.5); color: #1bd96a; }
+  .likeshead { margin: 4px 11px 6px; border-radius: 14px; background: linear-gradient(135deg, rgba(27,217,106,.35), #16181c 70%); border: 1px solid #25262b; padding: 10px; display: flex; align-items: center; gap: 9px; }
+  .likeshead .big { width: 44px; height: 44px; border-radius: 10px; background: #1bd96a; color: #000; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+  .likeshead b { color: #fff; font-size: 13px; display: block; }
+  .btn { border-radius: 12px; background: #1bd96a; color: #000; font-weight: 600; text-align: center; padding: 7px; margin: 4px 11px; font-size: 10px; }
+  .btn.sec { background: #25262b; color: #fff; }
+  .card { margin: 4px 11px; border-radius: 14px; background: #16181c; border: 1px solid #25262b; padding: 9px; }
+  .card b { color: #fff; display: block; font-size: 11px; }
+  .badge { border-radius: 4px; padding: 1px 4px; font-size: 7.5px; background: #303138; color: #fff; margin-left: 3px; }
+  .badge.g { background: rgba(27,217,106,.2); color: #1bd96a; }
+  .full { background: radial-gradient(circle at 50% 30%, rgba(27,217,106,.45), #000 65%); }
+  .art { width: 160px; height: 160px; border-radius: 14px; background: #303138; margin: 18px auto 12px; box-shadow: 0 14px 40px rgba(0,0,0,.6); }
+  .ctr { display: flex; justify-content: center; align-items: center; gap: 22px; color: #fff; font-size: 14px; margin-top: 8px; }
+  .ctr .big { width: 46px; height: 46px; border-radius: 99px; background: #1bd96a; color: #000; display: flex; align-items: center; justify-content: center; }
+  .prog { margin: 10px 18px 2px; height: 3px; border-radius: 3px; background: #303138; } .prog i { display: block; width: 40%; height: 3px; background: #fff; border-radius: 3px; }
+  .times { display: flex; justify-content: space-between; margin: 0 18px; font-size: 8px; }
+  .sync { text-align: center; color: #1bd96a; font-size: 9px; margin-top: 10px; }
+  .label { text-align: center; max-width: 220px; } .label h3 { margin: 0; font-size: 15px; } .label p { margin: 3px 0 0; font-size: 12px; }
+</style>
+
+<h2>Раскладка как в Яндекс Музыке, в нашем стиле</h2>
+<p class="subtitle">Вкладки снизу и мини-плеер над ними, профиль и настройки — по аватару сверху, полный плеер выезжает из мини-плеера. Своё: зелёный OLED-стиль Modrinth и вкладка «Комната». Поиск, альбомы и плейлисты — позже, место под них есть.</p>
+
+<div class="phones">
+  <div class="phone-wrap">
+    <div class="phone">
+      <div class="st"><span>12:30</span><span>▮▮ 82%</span></div>
+      <div class="top"><span class="title">Главная</span><span style="display:flex;gap:6px;align-items:center"><span class="pill"><span class="dot"></span>дом · 3</span><span class="ava">Р</span></span></div>
+      <div class="wave"><span>Волна комнаты · подбирается для вас</span><b>Моя волна</b><div class="play">▶</div><span class="tune">Настроить</span></div>
+      <div class="h">Режимы <em>листаются</em></div>
+      <div class="carousel">
+        <span class="preset"><i style="background:linear-gradient(135deg,#f67687,#c084fc)"></i>Энергичное</span>
+        <span class="preset"><i style="background:linear-gradient(135deg,#2dd4bf,#1bd96a)"></i>Русский рэп</span>
+        <span class="preset"><i style="background:linear-gradient(135deg,#4f9cff,#c084fc)"></i>Рок</span>
+      </div>
+      <div class="spacer"></div>
+      <div class="mini"><span class="cov"></span><div><b>Молчи</b>кис-кис</div><span class="p">❚❚</span></div>
+      <div class="bar"><i></i></div>
+      <div class="tabs"><span class="tab on"><i></i>Главная</span><span class="tab"><i></i>Коллекция</span><span class="tab"><i></i>Комната</span></div>
+    </div>
+    <div class="label"><h3>Главная</h3><p>«Моя волна» крупно, под ней карусель режимов. Сверху — комната и аватар.</p></div>
+  </div>
+
+  <div class="phone-wrap">
+    <div class="phone">
+      <div class="st"><span>12:30</span><span>▮▮ 82%</span></div>
+      <div class="top"><span class="title">Коллекция</span><span class="ava">Р</span></div>
+      <div class="likeshead"><span class="big">♥</span><div><b>Мне нравится</b>412 треков</div></div>
+      <div style="display:flex;gap:6px;padding:0 11px"><span class="btn" style="flex:1;margin:0">▶ Слушать</span><span class="btn sec" style="flex:1;margin:0">⤨ Вперемешку</span></div>
+      <div class="h" style="padding-top:10px">Треки</div>
+      <div class="row"><span class="cov"></span><div><b>Dangerous</b>David Guetta</div><span class="heart">♥</span></div>
+      <div class="row"><span class="cov"></span><div><b>Какаду</b>N1NT3ND0</div><span class="heart">♥</span></div>
+      <div class="row"><span class="cov"></span><div><b>Я убил Марка</b>MORGENSHTERN</div><span class="heart">♥</span></div>
+      <div class="spacer"></div>
+      <div class="mini"><span class="cov"></span><div><b>Молчи</b>кис-кис</div><span class="p">❚❚</span></div>
+      <div class="bar"><i></i></div>
+      <div class="tabs"><span class="tab"><i></i>Главная</span><span class="tab on"><i></i>Коллекция</span><span class="tab"><i></i>Комната</span></div>
+    </div>
+    <div class="label"><h3>Коллекция</h3><p>Пока только «Мне нравится»; позже — плейлисты, альбомы, артисты.</p></div>
+  </div>
+
+  <div class="phone-wrap">
+    <div class="phone">
+      <div class="st"><span>12:30</span><span>▮▮ 82%</span></div>
+      <div class="top"><span class="title">Комната</span><span class="ava">Р</span></div>
+      <div class="card"><b>дом</b>ws://149.50.111.89:8787 · пинг 120 мс</div>
+      <div class="card"><b>Моя волна</b><span style="color:#1bd96a">Подбирается для Рома</span><div class="btn sec" style="margin:7px 0 0">Передать волну…</div></div>
+      <div class="h">Слушают <em>3</em></div>
+      <div class="row"><span class="ava" style="background:#4f9cff">Р</span><div><b>Рома <span class="badge g">вы</span><span class="badge">админ</span></b></div></div>
+      <div class="row"><span class="ava" style="background:#e08325">Л</span><div><b>laider <span class="badge">волна</span></b></div></div>
+      <div class="row"><span class="ava" style="background:#2dd4bf">М</span><div><b>Миша <span class="badge">без Плюса</span></b></div></div>
+      <div class="spacer"></div>
+      <div class="mini"><span class="cov"></span><div><b>Молчи</b>кис-кис · в синхроне</div><span class="p">❚❚</span></div>
+      <div class="bar"><i></i></div>
+      <div class="tabs"><span class="tab"><i></i>Главная</span><span class="tab"><i></i>Коллекция</span><span class="tab on"><i></i>Комната</span></div>
+    </div>
+    <div class="label"><h3>Комната</h3><p>Как колонка на ПК: волна, кто слушает, админ. Не в комнате — список комнат сервера.</p></div>
+  </div>
+
+  <div class="phone-wrap">
+    <div class="phone full">
+      <div class="st"><span>12:30</span><span>▮▮ 82%</span></div>
+      <div class="top"><span style="color:#fff;font-size:14px">⌄</span><span class="pill"><span class="dot"></span>дом · 3</span><span style="color:#fff">⋯</span></div>
+      <div class="art"></div>
+      <div style="padding:0 18px;display:flex;align-items:center"><div><b style="color:#fff;font-size:14px;display:block">Молчи</b>кис-кис</div><span class="heart" style="font-size:16px">♥</span></div>
+      <div class="prog"><i></i></div><div class="times"><span>1:12</span><span>3:18</span></div>
+      <div class="ctr"><span>✕</span><span>⏮</span><span class="big">❚❚</span><span>⏭</span><span>⟳</span></div>
+      <div class="sync">● В синхроне с комнатой, 38 мс</div>
+    </div>
+    <div class="label"><h3>Плеер</h3><p>Из мини-плеера вверх. «Не нравится», лайк, и видно, что вы в синхроне.</p></div>
+  </div>
+</div>
