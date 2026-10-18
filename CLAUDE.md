@@ -112,6 +112,9 @@ Android (`android/`, `crates/android/`; план — `docs/superpowers/plans/202
   в памяти: файловый на JVM под Windows не может заменить свой файл при второй записи.
 - Material 3 Expressive: `Slider` рисует толстую дорожку с разрывом — у перемотки свои `thumb`/`track`. Тема всегда
   тёмная: `enableEdgeToEdge(SystemBarStyle.dark(...))`, иначе на графите значки статус-бара тусклые.
+- WebView входа (`auth/LoginScreen.kt`) — с `layoutParams` MATCH_PARENT: с WRAP_CONTENT от `AndroidView` в нём
+  `100vh` = 0, и выезжающие меню Яндекса ID (повторная отправка кода) оказываются над экраном. Отладка страницы —
+  debug-сборка, `adb forward tcp:9339 localabstract:webview_devtools_remote_<pid>` и CDP на этом порту.
 
 ## Синхрон
 
