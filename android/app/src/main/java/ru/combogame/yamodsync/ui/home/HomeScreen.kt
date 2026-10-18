@@ -26,13 +26,13 @@ import ru.combogame.yamodsync.ui.theme.YaTokens
  * волны и без Плюса смена режима отказывает теми же словами, что и мод.
  */
 @Composable
-fun HomeScreen(snapshot: RoomSnapshot?, presets: List<WavePreset>?, onCommand: (RoomCommand) -> Unit) {
+fun HomeScreen(snapshot: RoomSnapshot?, presets: List<WavePreset>?, inRoom: Boolean, onCommand: (RoomCommand) -> Unit) {
     val context = LocalContext.current
     val station = parseStation(snapshot?.station)
     val plain = station == null || isPlainWave(station)
     val owner = waveOwner(snapshot)
     val unfed = snapshot?.stationUnfed == true
-    val view = waveHeroView(station, owner, snapshot?.roomPlaying == true, unfed, plain)
+    val view = waveHeroView(station, owner, snapshot?.roomPlaying == true, unfed, plain, inRoom)
     val current = if (station == null || plain) null else presets?.firstOrNull { it.seeds == station.seeds }?.id
 
     fun guarded(command: RoomCommand) {

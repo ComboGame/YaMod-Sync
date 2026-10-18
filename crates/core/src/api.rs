@@ -277,9 +277,13 @@ impl YandexMusic {
                     &[("format", format), ("timeStamp", &stamp), ("sign", &sign)],
                 )
                 .await;
-            let Ok(found) = found else {
-                // 404 for a format the track has not got; try the next one.
-                continue;
+            let found = match found {
+                Ok(found) => found,
+                Err(err) => {
+                    // 404 for a format the track has not got; try the next one.
+                    tracing::info!(track = id, format, "no lyrics in this format: {err:#}");
+                    continue;
+                }
             };
             if found.download_url.is_empty() {
                 continue;

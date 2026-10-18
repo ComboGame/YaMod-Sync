@@ -44,10 +44,11 @@ data class WaveHeroView(
     val unfed: Boolean,
 )
 
-fun waveHeroView(station: StationInfo?, owner: String?, playing: Boolean, unfed: Boolean, plain: Boolean): WaveHeroView {
+fun waveHeroView(station: StationInfo?, owner: String?, playing: Boolean, unfed: Boolean, plain: Boolean, inRoom: Boolean): WaveHeroView {
     val title = station?.name?.takeUnless { plain } ?: "Моя волна"
     val caption = when {
-        station == null -> "Подбирается для вас"
+        // Без комнаты телефон слушает один: «волна комнаты» здесь ни о чём.
+        station == null || !inRoom -> "Подбирается для вас"
         unfed -> "Волна комнаты · включивший ушёл"
         owner != null -> "Волна комнаты · ведёт $owner"
         else -> "Волна комнаты · подбирается для вас"

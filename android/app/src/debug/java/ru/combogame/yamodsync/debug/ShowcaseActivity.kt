@@ -140,7 +140,7 @@ fun Showcase(screen: String) {
     val tab = when (screen.substringBefore('-')) { "collection" -> Tab.Collection; "room" -> Tab.Room; else -> Tab.Home }
     AppShell(snapshot, roomName = "дом", account = "Вы", onCommand = onCommand, onOpenPlayer = {}, onOpenSettings = {}, initialTab = tab) { t, _ ->
         when (t) {
-            Tab.Home -> HomeScreen(snapshot, demoPresets, onCommand)
+            Tab.Home -> HomeScreen(snapshot, demoPresets, inRoom = true, onCommand = onCommand)
             Tab.Collection -> CollectionScreen(snapshot, demoLikes, onCommand)
             Tab.Room -> RoomScreen(
                 snapshot = snapshot,

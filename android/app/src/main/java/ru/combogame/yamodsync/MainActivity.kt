@@ -112,7 +112,7 @@ private fun SignedIn(model: AppModel, updates: UpdateModel) {
             when (tab) {
                 Tab.Home -> androidx.compose.foundation.layout.Column {
                     UpdateBanner(update) { screen = Screen.Settings }
-                    HomeScreen(snapshot, presets, model.session::command)
+                    HomeScreen(snapshot, presets, inRoom = room?.room != null, onCommand = model.session::command)
                 }
                 Tab.Collection -> CollectionScreen(snapshot, likes, model.session::command)
                 Tab.Room -> RoomScreen(
