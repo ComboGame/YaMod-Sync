@@ -1,0 +1,7 @@
+{
+  // Стабильный cargo на этой машине — 1.76, он не понимает resolver = "3" из Cargo.toml.
+  "rust-analyzer.server.extraEnv": { "RUSTUP_TOOLCHAIN": "1.99.1" },
+  "rust-analyzer.cargo.extraEnv": { "RUSTUP_TOOLCHAIN": "1.99.1" },
+  "rust-analyzer.check.extraEnv": { "RUSTUP_TOOLCHAIN": "1.99.1" },
+  "rust-analyzer.files.exclude": ["mod/.versions", "mod/node_modules"]
+}
