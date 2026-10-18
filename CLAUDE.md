@@ -73,6 +73,13 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
   (кроме `/landing`: там перезагрузка), меню профиля — iframe Яндекс ID (отдельная CDP-цель).
 - `PRETTIFY=true` — прогнать prettier по пропатченной сборке (медленно).
 
+Android (`android/`, `crates/android/`; план — `docs/superpowers/plans/2026-10-18-android-app.md`):
+- SDK — `%LOCALAPPDATA%\Android\Sdk` (`ANDROID_HOME`), NDK 30.0.16248370 (`ANDROID_NDK_HOME`), платформы 36 и 37.0,
+  build-tools 37.0.0, AVD `ymsync-test` (Android 16, x86_64). Пакеты ставит `cmdline-tools\latest\bin\android.exe sdk
+  install <пакет>` (`sdkmanager` в новых cmdline-tools заменён «Android CLI»).
+- Rust-таргеты Android — в тулчейне 1.99.1; `cargo-ndk` 4.x. `adb` — из `%ANDROID_HOME%\platform-tools` (в `C:\adb`
+  лежит старый).
+
 ## Синхрон
 
 - Источник истины — релей. Клиент шлёт `do {command}`, релей применяет и рассылает всем
