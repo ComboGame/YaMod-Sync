@@ -17,7 +17,9 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.combogame.yamodsync.auth.LoginScreen
 import ru.combogame.yamodsync.auth.LoginState
+import ru.combogame.yamodsync.ui.home.HomeScreen
 import ru.combogame.yamodsync.ui.shell.AppShell
+import ru.combogame.yamodsync.ui.shell.Tab
 import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
 
 class MainActivity : ComponentActivity() {
@@ -69,6 +71,12 @@ private fun SignedIn(model: AppModel) {
     val snapshot by model.session.snapshot.collectAsStateWithLifecycle()
     val room by model.room.collectAsStateWithLifecycle()
     val login by model.login.collectAsStateWithLifecycle()
+    // Режимы колеса нужны только Главной; сессия ядра должна уже идти, иначе их не у кого спросить.
+    var presets by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<ru.combogame.yamodsync.core.WavePreset>?>(null) }
+    val running = snapshot != null
+    androidx.compose.runtime.LaunchedEffect(running) {
+        if (running && presets == null) presets = model.session.wavePresets().getOrNull() ?: emptyList()
+    }
     androidx.activity.compose.BackHandler(enabled = screen != Screen.Shell) { screen = Screen.Shell }
     when (screen) {
         Screen.Shell -> AppShell(
@@ -78,7 +86,12 @@ private fun SignedIn(model: AppModel) {
             onCommand = model.session::command,
             onOpenPlayer = { screen = Screen.Player },
             onOpenSettings = { screen = Screen.Settings },
-        ) { tab, _ -> Placeholder(tab.title) }
+        ) { tab, _ ->
+            when (tab) {
+                Tab.Home -> HomeScreen(snapshot, presets, model.session::command)
+                else -> Placeholder(tab.title)
+            }
+        }
         Screen.Player -> Placeholder("Плеер")
         Screen.Settings -> Placeholder("Настройки")
     }

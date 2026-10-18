@@ -19,6 +19,8 @@ import ru.combogame.yamodsync.core.Listener
 import ru.combogame.yamodsync.core.RoomCommand
 import ru.combogame.yamodsync.core.RoomSnapshot
 import ru.combogame.yamodsync.core.TrackRef
+import ru.combogame.yamodsync.core.WavePreset
+import ru.combogame.yamodsync.ui.home.HomeScreen
 import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.shell.Tab
 import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
@@ -38,6 +40,13 @@ val demoQueue = listOf(
     TrackRef("2", "11", "Альбом", "Утро", "Другой исполнитель", 187_000, "avatars.yandex.net/get-music-content/1/a.2/%%"),
 )
 
+val demoPresets = listOf(
+    WavePreset("energy", "Энергичное", "Бодрые треки", listOf("mood:energetic"), color = "#f67687"),
+    WavePreset("rnb", "R&B", "Ритм и блюз", listOf("genre:rnb"), color = "#4f9cff"),
+    WavePreset("rock", "Рок", null, listOf("genre:rock"), color = "#2dd4bf"),
+    WavePreset("calm", "Спокойное", "Для фона", listOf("mood:calm"), color = "#c084fc"),
+)
+
 val demoSnapshot = RoomSnapshot(
     connected = true,
     queue = demoQueue,
@@ -47,6 +56,7 @@ val demoSnapshot = RoomSnapshot(
     playing = true,
     roomPlaying = true,
     station = "user:onyourwave",
+    feeding = true,
     listeners = listOf(Listener(1, "Вы", you = true, admin = true), Listener(2, "Аня", feeds = true), Listener(3, "Миша", plus = false)),
     status = "connected",
     hasPlus = true,
@@ -54,12 +64,24 @@ val demoSnapshot = RoomSnapshot(
 
 @Composable
 fun Showcase(screen: String) {
-    var snapshot by remember { mutableStateOf(demoSnapshot) }
+    var snapshot by remember {
+        mutableStateOf(
+            when (screen) {
+                // Пресет, который ведёт другой участник: подпись «ведёт Аня» и «Вернуться к „Моей волне“».
+                "home-guest" -> demoSnapshot.copy(station = """{"seeds":["genre:rnb"],"name":"R&B","by":"Аня"}""", feeding = false)
+                "home-unfed" -> demoSnapshot.copy(stationUnfed = true)
+                else -> demoSnapshot
+            },
+        )
+    }
     val onCommand: (RoomCommand) -> Unit = { if (it == RoomCommand.Toggle) snapshot = snapshot.copy(roomPlaying = snapshot.roomPlaying != true) }
-    val tab = when (screen) { "collection" -> Tab.Collection; "room" -> Tab.Room; else -> Tab.Home }
+    val tab = when (screen.substringBefore('-')) { "collection" -> Tab.Collection; "room" -> Tab.Room; else -> Tab.Home }
     AppShell(snapshot, roomName = "дом", account = "Вы", onCommand = onCommand, onOpenPlayer = {}, onOpenSettings = {}, initialTab = tab) { t, _ ->
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(t.title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+        when (t) {
+            Tab.Home -> HomeScreen(snapshot, demoPresets, onCommand)
+            else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(t.title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+            }
         }
     }
 }
