@@ -19,9 +19,29 @@ import ru.combogame.yamodsync.auth.LoginState
 import ru.combogame.yamodsync.ui.theme.YaModSyncTheme
 
 class MainActivity : ComponentActivity() {
+    private var controller: com.google.common.util.concurrent.ListenableFuture<androidx.media3.session.MediaController>? = null
+
+    override fun onStart() {
+        super.onStart()
+        // Подключение к медиа-сессии и запускает службу: без неё музыка
+        // остановилась бы вместе с экраном.
+        val token = androidx.media3.session.SessionToken(this, android.content.ComponentName(this, ru.combogame.yamodsync.playback.PlaybackService::class.java))
+        controller = androidx.media3.session.MediaController.Builder(this, token).buildAsync()
+    }
+
+    override fun onStop() {
+        controller?.let { androidx.media3.session.MediaController.releaseFuture(it) }
+        controller = null
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {}
+                .launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
         val model = (application as YaModSyncApp).model
         setContent {
             YaModSyncTheme {

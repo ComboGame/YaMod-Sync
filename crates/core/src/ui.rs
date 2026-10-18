@@ -43,6 +43,9 @@ pub enum UiCommand {
     Shuffle { on: bool },
     Name { name: String },
     Like { track: TrackRef, liked: bool },
+    /// This device's loudness, 0.0 to 1.0; the room never hears of it. The
+    /// phone silences itself with it while a call has the speaker.
+    Volume { value: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -82,6 +85,7 @@ pub fn engine_command(command: UiCommand) -> Command {
         UiCommand::Shuffle { on } => Command::SetShuffle(on),
         UiCommand::Name { name } => Command::SetName(name),
         UiCommand::Like { track, liked } => Command::Like { track, liked },
+        UiCommand::Volume { value } => Command::SetVolume(value.clamp(0.0, 1.0)),
     }
 }
 
@@ -102,5 +106,12 @@ mod tests {
             }
         );
         assert_eq!(engine_command(UiCommand::StopWave), Command::StopStation);
+    }
+
+    /// The phone silences only itself for a call: volume never leaves the device.
+    #[test]
+    fn volume_is_this_devices_own() {
+        let quiet: UiCommand = serde_json::from_str(r#"{"c":"volume","value":0.0}"#).unwrap();
+        assert_eq!(engine_command(quiet), Command::SetVolume(0.0));
     }
 }

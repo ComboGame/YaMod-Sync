@@ -207,6 +207,11 @@ sealed interface RoomCommand {
         override fun toJson() = Named("name") { put("name", name) }.json()
     }
 
+    /** Громкость этого телефона, 0…1; комната о ней не знает. */
+    data class Volume(val value: Float) : RoomCommand {
+        override fun toJson() = Named("volume") { put("value", value) }.json()
+    }
+
     data class Like(val track: TrackRef, val liked: Boolean) : RoomCommand {
         override fun toJson() = Named("like") {
             put("track", coreJson.encodeToJsonElement(track))
