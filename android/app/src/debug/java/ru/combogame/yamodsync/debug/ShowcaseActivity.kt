@@ -20,6 +20,7 @@ import ru.combogame.yamodsync.core.RoomCommand
 import ru.combogame.yamodsync.core.RoomSnapshot
 import ru.combogame.yamodsync.core.TrackRef
 import ru.combogame.yamodsync.core.WavePreset
+import ru.combogame.yamodsync.ui.collection.CollectionScreen
 import ru.combogame.yamodsync.ui.home.HomeScreen
 import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.shell.Tab
@@ -39,6 +40,9 @@ val demoQueue = listOf(
     TrackRef("1", "10", "Альбом", "Ночной город", "Исполнитель", 214_000, "avatars.yandex.net/get-music-content/1/a.1/%%"),
     TrackRef("2", "11", "Альбом", "Утро", "Другой исполнитель", 187_000, "avatars.yandex.net/get-music-content/1/a.2/%%"),
 )
+
+val demoLikes = demoQueue + listOf("Dangerous" to "David Guetta", "Какаду" to "N1NT3ND0", "Звёзды" to "Группа", "Ветер" to "Певица")
+    .mapIndexed { i, (title, artist) -> TrackRef("${i + 3}", "${i + 20}", "Альбом", title, artist, 200_000, null) }
 
 val demoPresets = listOf(
     WavePreset("energy", "Энергичное", "Бодрые треки", listOf("mood:energetic"), color = "#f67687"),
@@ -79,6 +83,7 @@ fun Showcase(screen: String) {
     AppShell(snapshot, roomName = "дом", account = "Вы", onCommand = onCommand, onOpenPlayer = {}, onOpenSettings = {}, initialTab = tab) { t, _ ->
         when (t) {
             Tab.Home -> HomeScreen(snapshot, demoPresets, onCommand)
+            Tab.Collection -> CollectionScreen(snapshot, demoLikes, onCommand)
             else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(t.title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
             }

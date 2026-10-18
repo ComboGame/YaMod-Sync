@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ru.combogame.yamodsync.auth.LoginScreen
 import ru.combogame.yamodsync.auth.LoginState
+import ru.combogame.yamodsync.ui.collection.CollectionScreen
 import ru.combogame.yamodsync.ui.home.HomeScreen
 import ru.combogame.yamodsync.ui.shell.AppShell
 import ru.combogame.yamodsync.ui.shell.Tab
@@ -77,6 +78,12 @@ private fun SignedIn(model: AppModel) {
     androidx.compose.runtime.LaunchedEffect(running) {
         if (running && presets == null) presets = model.session.wavePresets().getOrNull() ?: emptyList()
     }
+    // «Мне нравится» перечитывается, когда ядро говорит, что лайки сменились (здесь или в другом клиенте).
+    var likes by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<ru.combogame.yamodsync.core.TrackRef>?>(null) }
+    val likedRevision = snapshot?.likedRevision
+    androidx.compose.runtime.LaunchedEffect(running, likedRevision) {
+        if (running) model.session.likes().onSuccess { likes = it }.onFailure { if (likes == null) likes = emptyList() }
+    }
     androidx.activity.compose.BackHandler(enabled = screen != Screen.Shell) { screen = Screen.Shell }
     when (screen) {
         Screen.Shell -> AppShell(
@@ -89,6 +96,7 @@ private fun SignedIn(model: AppModel) {
         ) { tab, _ ->
             when (tab) {
                 Tab.Home -> HomeScreen(snapshot, presets, model.session::command)
+                Tab.Collection -> CollectionScreen(snapshot, likes, model.session::command)
                 else -> Placeholder(tab.title)
             }
         }
