@@ -3,6 +3,7 @@ package ru.combogame.yamodsync.ui.room
 import ru.combogame.yamodsync.core.Listener
 import ru.combogame.yamodsync.core.RoomListing
 import ru.combogame.yamodsync.core.RoomSnapshot
+import ru.combogame.yamodsync.core.StationInfo
 
 /**
  * Кому можно передать волну — как `wave-card.tsx` мода: всем, кроме того, кто её уже
@@ -26,3 +27,14 @@ fun joinButtonText(room: String, listed: List<RoomListing>): String =
 
 /** Ядро пишет ошибку со строчной буквы (её вставляют в середину фразы); на экране она — предложение. */
 fun roomsErrorText(code: String, message: String): String = message.replaceFirstChar { it.uppercase() }
+
+/**
+ * Кто ведёт волну — строка под её названием. Имя не склоняется («для Роман» — ошибка),
+ * поэтому «ведёт». Ушедший ведущий уже ничего не подбирает: тогда так и сказано.
+ */
+fun waveLeader(s: RoomSnapshot, wave: StationInfo): String = when {
+    s.stationUnfed -> "Без ведущего"
+    s.feeding -> "Подбирается для вас"
+    wave.by != null -> "Ведёт ${wave.by}"
+    else -> "Ведёт другой участник"
+}

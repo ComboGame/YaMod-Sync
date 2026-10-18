@@ -55,14 +55,12 @@ fun WaveCard(s: RoomSnapshot, onCommand: (RoomCommand) -> Unit) {
         }
         return
     }
-    val whose = when {
-        s.feeding -> "Подбирается для вас"
-        wave.by != null -> "Подбирается для ${wave.by}"
-        else -> "Подбирается для участника"
-    }
+    val whose = waveLeader(s, wave)
     val preset = !isPlainWave(wave)
     YaCard(Modifier.fillMaxWidth(), brand = true) {
-        Header(wave.name ?: "Моя волна", wave.description ?: "Моя волна", whose)
+        val title = wave.name ?: "Моя волна"
+        // У «Моей волны» описание — то же название: второй раз его не пишем.
+        Header(title, wave.description?.takeUnless { it.isBlank() || it == title }, whose)
         when {
             s.stationUnfed -> {
                 Note("Включивший волну вышел. Очередь доиграет, новых треков не будет.")

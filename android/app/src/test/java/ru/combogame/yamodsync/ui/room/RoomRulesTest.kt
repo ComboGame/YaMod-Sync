@@ -6,6 +6,7 @@ import org.junit.Test
 import ru.combogame.yamodsync.core.Listener
 import ru.combogame.yamodsync.core.RoomListing
 import ru.combogame.yamodsync.core.RoomSnapshot
+import ru.combogame.yamodsync.core.StationInfo
 
 class RoomRulesTest {
     private val me = Listener(1, "Я", you = true)
@@ -61,5 +62,20 @@ class RoomRulesTest {
     fun roomsErrorsAreTheCoresPhrases() {
         assertEquals("Неверный пароль", roomsErrorText("unauthorized", "неверный пароль"))
         assertEquals("Не удалось подключиться к серверу: timeout", roomsErrorText("unreachable", "не удалось подключиться к серверу: timeout"))
+    }
+
+    private val romansWave = StationInfo(seeds = listOf("user:onyourwave"), name = "Моя волна", by = "Роман Меньшиков")
+
+    /** Имя не склоняется: «ведёт», а не «подбирается для Роман». */
+    @Test
+    fun someoneElsesWaveSaysWhoLeadsIt() {
+        assertEquals("Ведёт Роман Меньшиков", waveLeader(RoomSnapshot(), romansWave))
+        assertEquals("Подбирается для вас", waveLeader(RoomSnapshot(feeding = true), romansWave))
+    }
+
+    /** Ведущий ушёл — никто ничего не подбирает, даже если это были вы. */
+    @Test
+    fun aWaveWhoseLeaderLeftHasNoLeader() {
+        assertEquals("Без ведущего", waveLeader(RoomSnapshot(stationUnfed = true), romansWave))
     }
 }
