@@ -13,3 +13,6 @@
 
 # Черновики макетов из обсуждений
 /.superpowers/
+
+# Rust core built for the Android app by cargo-ndk
+/crates/android/jniLibs/
