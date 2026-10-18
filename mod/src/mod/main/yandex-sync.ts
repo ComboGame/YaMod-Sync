@@ -7,11 +7,84 @@
 // (см. features/yandex-sync в renderer).
 import { app, BrowserWindow, ipcMain } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { readSettings, writeSetting } from "./storage";
 
 const BRIDGE_EXE = "ymsync-bridge.exe";
+/** Должен совпадать с PROTOCOL_VERSION в crates/proto/src/message.rs. */
+const PROTOCOL_VERSION = 6;
+const ROOMS_TIMEOUT_MS = 6000;
+
+/**
+ * Постоянный id этой установки. По нему релей узнаёт админа комнаты и после
+ * переподключения: id соединения при этом меняется, а этот — нет.
+ */
+function clientId(): string {
+  const saved = readSettings()["sync/clientId"];
+  if (typeof saved === "string" && saved) return saved;
+  const id = crypto.randomUUID();
+  writeSetting("sync/clientId", id);
+  return id;
+}
+
+export type RoomListing = { name: string; listeners: string[]; track?: string; playing: boolean; wave?: boolean };
+
+/**
+ * Комнаты на сервере — для того, кто знает пароль. Отдельное короткое
+ * соединение: list_rooms вместо hello, ответ, и релей закрывает его сам.
+ */
+function listRooms(relay: string, password: string): Promise<{ ok: true; rooms: RoomListing[] } | { ok: false; error: string }> {
+  return new Promise((resolve) => {
+    let ws: WebSocket;
+    let done = false;
+    const finish = (result: { ok: true; rooms: RoomListing[] } | { ok: false; error: string }) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        ws?.close();
+      } catch {}
+      resolve(result);
+    };
+    // Релей старой версии запрос не понимает и молча ждёт hello.
+    const timer = setTimeout(
+      () => finish({ ok: false, error: "сервер не прислал список комнат — возможно, он старой версии. Введите название сами" }),
+      ROOMS_TIMEOUT_MS,
+    );
+    try {
+      ws = new WebSocket(relay);
+    } catch {
+      finish({ ok: false, error: "неверный адрес сервера: нужен ws://… или wss://…" });
+      return;
+    }
+    ws.addEventListener("open", () => ws.send(JSON.stringify({ t: "list_rooms", protocol: PROTOCOL_VERSION, token: password })));
+    ws.addEventListener("message", (event) => {
+      let message: any;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (message?.t === "rooms") finish({ ok: true, rooms: Array.isArray(message.rooms) ? message.rooms : [] });
+      else if (message?.t === "error") {
+        finish({
+          ok: false,
+          error:
+            message.code === "unauthorized"
+              ? "неверный пароль"
+              : message.code === "expected_hello"
+                ? "сервер старой версии не показывает комнаты — введите название сами"
+                : String(message.message ?? message.code),
+        });
+      }
+    });
+    ws.addEventListener("error", () => finish({ ok: false, error: "не удалось подключиться к серверу" }));
+    ws.addEventListener("close", () => finish({ ok: false, error: "сервер закрыл соединение" }));
+  });
+}
 
 let bridge: ChildProcessWithoutNullStreams | null = null;
 
@@ -108,7 +181,7 @@ export function setupYandexSync() {
     }
     // Кэш ядра (сайдкары треков, «Мне нравится») — в профиле приложения.
     const dataDir = path.join(app.getPath("userData"), "ymsync");
-    lastStart = { t: "start", config: { ...config, data_dir: dataDir } };
+    lastStart = { t: "start", config: { ...config, client_id: clientId(), data_dir: dataDir } };
     send(lastStart);
     lastRoom = { room: String(config.room ?? ""), relay: String(config.relay ?? ""), host: config.host === true };
     setFullSpeed(true);
@@ -116,6 +189,8 @@ export function setupYandexSync() {
   });
 
   ipcMain.handle("yandexSync.state", () => ({ status: lastStatus, room: lastRoom }));
+
+  ipcMain.handle("yandexSync.rooms", (_event, relay: string, password: string) => listRooms(String(relay).trim(), String(password)));
 
   // Перезагруженное окно: тот же start ещё раз. Мост на него отвечает статусом,
   // снапшотом и очередью и заново ставит трек в плеер (см. bridge/src/lib.rs).

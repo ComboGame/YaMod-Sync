@@ -26,6 +26,10 @@ pub struct Config {
     /// What the rest of the room calls this listener. Empty means the device's
     /// own name — see [`Config::display_name`].
     pub name: String,
+    /// Tells this installation apart from the others across reconnects, which
+    /// is how the room still knows its admin. Empty is allowed: such a listener
+    /// can simply never be admin.
+    pub client_id: String,
     pub sync: SyncConfig,
     pub cache: CacheConfig,
     pub share: ShareConfig,
@@ -41,6 +45,7 @@ impl Default for Config {
             yandex_token: String::new(),
             volume: 0.8,
             name: String::new(),
+            client_id: String::new(),
             sync: SyncConfig::default(),
             cache: CacheConfig::default(),
             share: ShareConfig::default(),

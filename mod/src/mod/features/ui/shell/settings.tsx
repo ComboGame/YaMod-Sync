@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
-import { Code2, ListMusic, LogOut, Paintbrush, Radio, Sparkles, Users, X } from "lucide-react";
+import { Code2, Download, ListMusic, LogOut, Paintbrush, Radio, Sparkles, Users, X } from "lucide-react";
 import { FaGithub } from "react-icons/fa";
 
 import { Button } from "@ui/components/ui/button";
@@ -17,6 +17,8 @@ import { Devtools } from "@ui/components/devtools";
 import { AutoBestQuality } from "@ui/components/auto-best-quality";
 import { DiscordRPC } from "@ui/components/discord-rpc";
 import { AutoLiker } from "@ui/components/auto-liker";
+import { UpdateCard } from "@ui/components/update-card";
+import { updateReady, useUpdate } from "@ui/hooks/use-update";
 import { useSync } from "@ui/hooks/use-sync";
 import { contentIn, modalIn, modalOut } from "@ui/lib/motion";
 import { cn } from "@ui/lib/utils";
@@ -44,6 +46,7 @@ const GROUPS: { title: string; items: Item[] }[] = [
     items: [
       { id: "appearance", label: "Внешний вид", icon: Paintbrush },
       { id: "features", label: "Возможности", icon: Sparkles },
+      { id: "updates", label: "Обновления", icon: Download },
     ],
   },
   {
@@ -58,6 +61,7 @@ const TITLES: Record<SettingsScreen, { title: string; text: string }> = {
   people: { title: "Участники", text: "Все, кто сейчас слушает вместе с вами." },
   appearance: { title: "Оформление", text: "Как выглядит Яндекс Музыка." },
   features: { title: "Возможности", text: "Дополнения к приложению." },
+  updates: { title: "Обновления", text: "Новые версии мода приходят сюда сами." },
   system: { title: "Разработчику", text: "Инструменты для отладки и сведения о моде." },
 };
 
@@ -227,7 +231,7 @@ function SystemScreen({ devtools }: { devtools: boolean }) {
       <Card>
         <CardTitle title="О моде" />
         <p className="text-muted-foreground text-[13px] leading-snug">
-          Яндекс Музыка со встроенным YandexSync. Работает с вашей подпиской Плюс: мод не открывает платное и не
+          Яндекс Музыка со встроенным YandexSync. Треки играют с вашего аккаунта: мод не открывает платное и не
           скачивает треки. Синхрон — ядро ym-sync, интерфейс и патчер выросли из Yandex Music Mod.
         </p>
         <Button variant="secondary" size="sm" className="mt-3" onClick={() => window.open(REPO_URL, "_blank", "noreferrer")}>
@@ -244,6 +248,7 @@ function SystemScreen({ devtools }: { devtools: boolean }) {
  */
 export function SettingsModal({ screen, devtools }: { screen: SettingsScreen; devtools: boolean }) {
   const sync = useSync();
+  const fresh = updateReady(useUpdate());
   const dialog = useRef<HTMLDivElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -316,6 +321,7 @@ export function SettingsModal({ screen, devtools }: { screen: SettingsScreen; de
                     >
                       <Icon className="size-[18px]" />
                       {label}
+                      {id === "updates" && fresh && <span className="ml-auto size-2 rounded-full bg-brand" aria-label="есть обновление" />}
                     </button>
                   ))}
                 </div>
@@ -341,6 +347,7 @@ export function SettingsModal({ screen, devtools }: { screen: SettingsScreen; de
               {screen === "appearance" && <AppearanceScreen />}
               {screen === "features" && <FeaturesScreen />}
               {screen === "system" && <SystemScreen devtools={devtools} />}
+              {screen === "updates" && <UpdateCard />}
             </div>
           </div>
         </div>

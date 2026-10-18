@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 export type Theme = "modrinth" | "original";
 
-export type SettingsScreen = "room" | "queue" | "people" | "appearance" | "features" | "system";
+export type SettingsScreen = "room" | "queue" | "people" | "appearance" | "features" | "updates" | "system";
 
 export type ShellState = {
   theme: Theme;

@@ -137,7 +137,7 @@ pub fn engine_command(command: UiCommand) -> Command {
         UiCommand::SetQueue { tracks, start } => Command::SetQueue { tracks, start },
         UiCommand::Enqueue { tracks } => Command::Enqueue { tracks },
         UiCommand::PlayNext { tracks } => Command::PlayNext { tracks },
-        UiCommand::Wave { seeds } => Command::PlayWave { seeds },
+        UiCommand::Wave { seeds, fresh } => Command::PlayWave { seeds, fresh },
         UiCommand::WaveFeedback { kind, track_id } => Command::WaveFeedback {
             track_id,
             kind: match kind {
@@ -148,6 +148,8 @@ pub fn engine_command(command: UiCommand) -> Command {
             },
         },
         UiCommand::StopWave => Command::StopStation,
+        UiCommand::HandWave { to } => Command::HandWave { to },
+        UiCommand::SetAdmin { peer } => Command::SetAdmin { peer },
         UiCommand::Repeat { mode } => Command::SetRepeat(mode),
         UiCommand::Shuffle { on } => Command::SetShuffle(on),
         UiCommand::Name { name } => Command::SetName(name),
@@ -164,6 +166,7 @@ pub fn core_config(start: &StartConfig) -> Config {
         room_token: start.password.trim().to_string(),
         yandex_token: start.yandex_token.trim().to_string(),
         name: start.name.trim().to_string(),
+        client_id: start.client_id.trim().to_string(),
         volume: 1.0,
         cache: CacheConfig {
             dir: data.join("tracks").to_string_lossy().to_string(),

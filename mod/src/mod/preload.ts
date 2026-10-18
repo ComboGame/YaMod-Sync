@@ -21,10 +21,17 @@ if (window === window.top && window.location.protocol === "music-application:") 
       stop: () => electron.ipcRenderer.invoke("yandexSync.stop"),
       state: () => electron.ipcRenderer.invoke("yandexSync.state"),
       resume: () => electron.ipcRenderer.invoke("yandexSync.resume"),
+      rooms: (relay: string, password: string) => electron.ipcRenderer.invoke("yandexSync.rooms", relay, password),
       command: (command: unknown) => electron.ipcRenderer.send("yandexSync.command", command),
       reportPlayer: (state: unknown) => electron.ipcRenderer.send("yandexSync.player", state),
       reportLoaded: (result: unknown) => electron.ipcRenderer.send("yandexSync.loaded", result),
       onEvent: (cb: (message: unknown) => void) => subscribe("yandexSync.event", cb),
+    },
+    update: {
+      state: () => electron.ipcRenderer.invoke("modUpdate.state"),
+      check: () => electron.ipcRenderer.invoke("modUpdate.check"),
+      install: () => electron.ipcRenderer.invoke("modUpdate.install"),
+      onEvent: (cb: (state: unknown) => void) => subscribe("modUpdate.event", cb),
     },
   });
 }

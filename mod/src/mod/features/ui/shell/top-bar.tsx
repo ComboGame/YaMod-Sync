@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Disc3,
+  Download,
   Heart,
   History,
   ListMusic,
@@ -20,11 +21,12 @@ import {
 } from "lucide-react";
 
 import { useSync } from "@ui/hooks/use-sync";
+import { updateReady, useUpdate } from "@ui/hooks/use-update";
 import { SyncDot, syncState } from "@ui/components/sync/now-playing";
 import { cn } from "@ui/lib/utils";
 import { BrandMark } from "./brand";
 import { navigate, useRoute, type Section } from "./route";
-import { dockOpen, toggleDock, useShell, wideWindow } from "./shell-state";
+import { dockOpen, openSettings, toggleDock, useShell, wideWindow } from "./shell-state";
 
 const ICONS: Record<Section, typeof Search> = {
   wave: AudioWaveform,
@@ -82,6 +84,24 @@ function RoundButton(props: { label: string; onClick: () => void; disabled?: boo
 /** «1 слушает», «3 слушают». */
 export function listening(count: number) {
   return `${count} ${count === 1 ? "слушает" : "слушают"}`;
+}
+
+/** Вышла новая версия мода — видно сразу, а поставить можно в настройках. */
+function UpdatePill() {
+  const update = useUpdate();
+  if (!updateReady(update)) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => openSettings("updates")}
+      style={NO_DRAG}
+      aria-label={`Вышла версия ${update!.version}: открыть обновления`}
+      className="flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-brand px-3 text-[13px] font-semibold text-black transition-[filter] outline-none hover:brightness-110 focus-visible:ring-[3px] focus-visible:ring-brand-soft"
+    >
+      <Download className="size-4" aria-hidden />
+      <span className="whitespace-nowrap">Обновление {update!.version}</span>
+    </button>
+  );
 }
 
 /** Состояние комнаты справа в панели: как «Нет активных сборок» у Modrinth. Открывает колонку. */
@@ -168,6 +188,7 @@ export function TopBar() {
         <Search className="size-4" aria-hidden />
         <span className="truncate whitespace-nowrap">Поиск музыки</span>
       </button>
+      <UpdatePill />
       <RoomPill />
     </header>
   );

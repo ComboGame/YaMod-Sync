@@ -25,6 +25,11 @@ use serde::{Deserialize, Serialize};
 ///   [`Command::SetShuffle`] are room-wide modes carried in [`PlaybackState`],
 ///   and every peer has a name — given in the hello, changed with
 ///   [`ClientMsg::SetName`] — that the relay lists in [`ServerMsg::Roster`].
+///
+/// Later additions to 6 are optional fields and messages an older peer ignores,
+/// so they did not bump the version: a stable client id and the account's Плюс
+/// in the hello, a room admin ([`Command::HandStation`], [`Command::SetAdmin`],
+/// [`ServerMsg::TakeStation`]), and [`ClientMsg::ListRooms`] in place of a hello.
 pub const PROTOCOL_VERSION: u16 = 6;
 
 /// What happens when a track ends. A room-wide setting, like the queue itself.
@@ -53,6 +58,32 @@ pub struct RosterEntry {
     pub peer: u64,
     /// The name the listener chose; empty when they have not chosen one.
     pub name: String,
+    /// This listener runs the room: may switch anybody's wave off, hand it to
+    /// someone else, and pass the role on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
+    /// Whether the listener's account has Плюс; `None` when their client did not
+    /// say. Without it a listener hears the room's wave but cannot feed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plus: Option<bool>,
+    /// This listener feeds the room's wave.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub feeds: bool,
+}
+
+/// A room as the relay lists it to somebody who knows the password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomListing {
+    pub name: String,
+    /// Who is connected right now, by name; empty for a room kept while empty.
+    pub listeners: Vec<String>,
+    /// What the room is on, `artist — title`, if anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
+    pub playing: bool,
+    /// The room follows a wave.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wave: bool,
 }
 
 /// Identifies a track well enough for another account to resolve it.
@@ -197,8 +228,14 @@ pub enum Command {
     Seek { position_ms: u64 },
     /// Claims or releases the endless station. The claiming peer becomes its
     /// feeder: only it can resolve more tracks, since the relay holds no Yandex
-    /// credentials. `None` releases the claim.
+    /// credentials. `None` releases the claim — or, from the room's admin,
+    /// switches off a wave somebody else feeds.
     SetStation { id: Option<String> },
+    /// Passes the wave to another listener, who goes on feeding it from their
+    /// own account with the same seeds. From its feeder or the room's admin.
+    HandStation { to: u64 },
+    /// Makes another listener the room's admin. From the admin only.
+    SetAdmin { peer: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +253,19 @@ pub enum ClientMsg {
         /// it. Peers that do not are not waited for.
         #[serde(default)]
         reports_ready: bool,
+        /// Stays the same across reconnects of one installation, so the room
+        /// still knows its admin when the admin's connection comes back.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        client_id: String,
+        /// Whether this account has Плюс, when the client could find out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plus: Option<bool>,
+    },
+    /// Sent instead of a hello: «which rooms are there?». Answered with
+    /// [`ServerMsg::Rooms`], after which the relay closes the connection.
+    ListRooms {
+        protocol: u16,
+        token: String,
     },
     /// The track the room is waiting on is loaded here and can start.
     Ready {
@@ -289,6 +339,19 @@ pub enum ServerMsg {
     Station {
         id: Option<String>,
         yours: bool,
+        /// The wave was taken from this peer by the admin or handed on, rather
+        /// than refused to it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        taken: bool,
+    },
+    /// Sent to the peer the wave was handed to: it feeds `id` from now on, from
+    /// its own account. The relay already counts it as the feeder.
+    TakeStation {
+        id: String,
+    },
+    /// The answer to [`ClientMsg::ListRooms`].
+    Rooms {
+        rooms: Vec<RoomListing>,
     },
     /// The room's whole sharing map, broadcast whenever it changes.
     ///
@@ -319,6 +382,11 @@ pub enum Event {
     Station {
         id: Option<String>,
         yours: bool,
+        taken: bool,
+    },
+    /// The wave was handed to this peer; see [`ServerMsg::TakeStation`].
+    TakeStation {
+        id: String,
     },
     /// Who in the room can serve which cached tracks over the local network.
     Shares {
@@ -411,11 +479,64 @@ mod tests {
                 id: Some("wave".into()),
             },
             Command::SetStation { id: None },
+            Command::HandStation { to: 4 },
+            Command::SetAdmin { peer: 5 },
         ];
         for command in commands {
             let text = serde_json::to_string(&command).unwrap();
             assert_eq!(command, serde_json::from_str::<Command>(&text).unwrap(), "{text}");
         }
+    }
+
+    /// What clients before the admin and the room list send, and what they read.
+    #[test]
+    fn an_older_peer_still_understands_and_is_understood() {
+        let hello: ClientMsg = serde_json::from_str(
+            r#"{"t":"hello","protocol":6,"room":"r","token":"t","client":"old","name":"n","reports_ready":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(hello, ClientMsg::Hello { client_id, plus: None, .. } if client_id.is_empty()));
+
+        let station = serde_json::to_string(&ServerMsg::Station {
+            id: None,
+            yours: false,
+            taken: false,
+        })
+        .unwrap();
+        assert_eq!(station, r#"{"t":"station","id":null,"yours":false}"#);
+
+        let roster = serde_json::to_string(&ServerMsg::Roster {
+            peers: vec![RosterEntry {
+                peer: 1,
+                name: "a".into(),
+                admin: false,
+                plus: None,
+                feeds: false,
+            }],
+        })
+        .unwrap();
+        assert_eq!(roster, r#"{"t":"roster","peers":[{"peer":1,"name":"a"}]}"#);
+    }
+
+    #[test]
+    fn a_room_list_roundtrips() {
+        let ask = ClientMsg::ListRooms {
+            protocol: PROTOCOL_VERSION,
+            token: "t".into(),
+        };
+        let text = serde_json::to_string(&ask).unwrap();
+        assert_eq!(text, r#"{"t":"list_rooms","protocol":6,"token":"t"}"#);
+        let answer = ServerMsg::Rooms {
+            rooms: vec![RoomListing {
+                name: "дом".into(),
+                listeners: vec!["Рома".into()],
+                track: Some("A — B".into()),
+                playing: true,
+                wave: true,
+            }],
+        };
+        let text = serde_json::to_string(&answer).unwrap();
+        assert_eq!(answer, serde_json::from_str::<ServerMsg>(&text).unwrap());
     }
 
     #[test]

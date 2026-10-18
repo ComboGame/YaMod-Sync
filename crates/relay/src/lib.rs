@@ -43,8 +43,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 use ymsync_proto::discovery::{DISCOVERY_PORT, Discovery, MAX_DATAGRAM, MAX_ROOMS_IN_REPLY, RoomBrief};
 use ymsync_proto::{
-    ClientMsg, Command, PROTOCOL_VERSION, PeerShare, PlaybackState, RepeatMode, RosterEntry,
-    ServerMsg, TrackRef, secret_eq, unix_ms,
+    ClientMsg, Command, PROTOCOL_VERSION, PeerShare, PlaybackState, RepeatMode, RoomListing,
+    RosterEntry, ServerMsg, TrackRef, secret_eq, unix_ms,
 };
 
 /// A client that says nothing at all for this long is assumed dead. Every peer
@@ -96,6 +96,14 @@ const START_LEAD_MS: i64 = 300;
 /// it rather than every player starting half a second behind the room and
 /// spending ten seconds of faster playback catching up.
 const NATURAL_GAP_MS: i64 = 450;
+
+/// How long a room waits for its admin to come back before the role passes to
+/// whoever has been in the room longest. Long enough for a restart or a lost
+/// Wi-Fi; short enough that a room is not left without anybody to run it.
+const ADMIN_GRACE_MS: i64 = 10 * 60 * 1000;
+
+/// Most rooms one listing names.
+const MAX_LISTED_ROOMS: usize = 100;
 
 /// How long a room with nobody in it keeps its queue.
 ///
@@ -388,6 +396,16 @@ async fn room_list(rooms: &Rooms) -> Vec<RoomBrief> {
     list
 }
 
+/// Every room, for a client that knows the password: occupied rooms first, the
+/// busiest at the top.
+async fn listings(rooms: &Rooms) -> Vec<RoomListing> {
+    let guard = rooms.lock().await;
+    let mut list: Vec<RoomListing> = guard.iter().map(|(name, room)| room.listing(name)).collect();
+    list.sort_by(|a, b| b.listeners.len().cmp(&a.listeners.len()).then_with(|| a.name.cmp(&b.name)));
+    list.truncate(MAX_LISTED_ROOMS);
+    list
+}
+
 fn encode_discovery(msg: &Discovery) -> Vec<u8> {
     serde_json::to_vec(msg).unwrap_or_else(|_| b"{}".to_vec())
 }
@@ -462,21 +480,46 @@ fn clean_name(name: &str) -> String {
 struct Changed {
     state: bool,
     queue: bool,
+    /// Who feeds the wave or who is admin moved, which the room's list shows.
+    roster: bool,
 }
 
 impl Changed {
     const NOTHING: Self = Self {
         state: false,
         queue: false,
+        roster: false,
     };
     const STATE: Self = Self {
         state: true,
         queue: false,
+        roster: false,
     };
     const BOTH: Self = Self {
         state: true,
         queue: true,
+        roster: false,
     };
+    const ROSTER: Self = Self {
+        state: false,
+        queue: false,
+        roster: true,
+    };
+    /// The wave changed hands: the state carries it, the list shows who.
+    const STATION: Self = Self {
+        state: true,
+        queue: false,
+        roster: true,
+    };
+}
+
+/// What the room knows about a listener beyond their connection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Member {
+    /// The installation's id; empty from clients that do not send one, which
+    /// can therefore never be admin.
+    client_id: String,
+    plus: Option<bool>,
 }
 
 /// The room's authoritative playback state.
@@ -513,6 +556,15 @@ struct RoomState {
     /// The id the next barrier gets; never reused, so a late `Ready` for an
     /// earlier track cannot release a later one.
     next_barrier: u64,
+    /// Who is connected, as far as commands need to know.
+    members: HashMap<u64, Member>,
+    /// The installation that runs the room: whoever opened it, or whom the role
+    /// was passed to. Kept by client id rather than connection, so the admin is
+    /// still the admin after reconnecting.
+    admin: Option<String>,
+    /// When the admin's last connection went, in relay time; see
+    /// [`ADMIN_GRACE_MS`].
+    admin_away_since: Option<i64>,
 }
 
 /// A track held at 0:00 until everybody can play it.
@@ -525,6 +577,78 @@ struct Barrier {
 }
 
 impl RoomState {
+    /// A listener arrived. The first installation that can be told apart from
+    /// the others becomes the admin; the admin coming back stops the clock that
+    /// would pass the role on. Answers whether who is admin changed.
+    fn member_joined(&mut self, peer: u64, client_id: String, plus: Option<bool>) -> bool {
+        let mut changed = false;
+        if !client_id.is_empty() {
+            match &self.admin {
+                None => {
+                    self.admin = Some(client_id.clone());
+                    changed = true;
+                }
+                Some(admin) if *admin == client_id => self.admin_away_since = None,
+                Some(_) => {}
+            }
+        }
+        self.members.insert(peer, Member { client_id, plus });
+        changed
+    }
+
+    /// A listener's connection went. The admin keeps the role for a while, so a
+    /// reconnect does not cost it.
+    fn member_left(&mut self, peer: u64, now: i64) {
+        self.members.remove(&peer);
+        if self.admin.is_some() && self.admin_peer().is_none() {
+            self.admin_away_since.get_or_insert(now);
+        }
+    }
+
+    fn is_admin(&self, peer: u64) -> bool {
+        self.members.get(&peer).is_some_and(|member| {
+            !member.client_id.is_empty() && self.admin.as_ref() == Some(&member.client_id)
+        })
+    }
+
+    /// The admin's connection, if the admin is here.
+    fn admin_peer(&self) -> Option<u64> {
+        self.members
+            .keys()
+            .copied()
+            .filter(|peer| self.is_admin(*peer))
+            .min()
+    }
+
+    /// Passes the role on when the admin has been away for too long: to whoever
+    /// has been here longest of those whose client can be told apart. Answers
+    /// whether it did.
+    fn expire_admin(&mut self, now: i64) -> bool {
+        let Some(since) = self.admin_away_since else {
+            return false;
+        };
+        if now - since < ADMIN_GRACE_MS {
+            return false;
+        }
+        let Some(heir) = self
+            .members
+            .iter()
+            .filter(|(_, member)| !member.client_id.is_empty())
+            .min_by_key(|(peer, _)| **peer)
+            .map(|(_, member)| member.client_id.clone())
+        else {
+            return false;
+        };
+        self.admin = Some(heir);
+        self.admin_away_since = None;
+        true
+    }
+
+    /// The listener feeding the wave, if somebody does.
+    fn feeder(&self) -> Option<u64> {
+        self.station.as_ref().and_then(|(_, owner)| *owner)
+    }
+
     /// A number in `0..bound`, for picking shuffled positions.
     fn random_below(&mut self, bound: usize) -> usize {
         if bound <= 1 {
@@ -746,7 +870,10 @@ impl RoomState {
                 | Command::SetShuffle { .. }
         );
         // Claiming the wave itself is refused further down, as `station_taken`.
+        // The admin is held to neither: running the room is the point of it.
+        let admin = self.is_admin(from);
         if reshapes_queue
+            && !admin
             && self
                 .station
                 .as_ref()
@@ -909,33 +1036,81 @@ impl RoomState {
             }
             Command::SetStation { id } => match id {
                 Some(id) => {
+                    // Feeding means resolving tracks on one's own account, which
+                    // takes Плюс. A client that did not say is given the benefit
+                    // of the doubt.
+                    if self.members.get(&from).is_some_and(|m| m.plus == Some(false)) {
+                        return Err("needs_plus");
+                    }
                     // A station nobody feeds is free for the taking: that is how
                     // a wave survives the peer that started it. Only a *live*
-                    // feeder makes the claim somebody else's.
-                    if self
-                        .station
-                        .as_ref()
-                        .is_some_and(|(_, owner)| owner.is_some_and(|owner| owner != from))
+                    // feeder makes the claim somebody else's — except to the
+                    // admin, who may start a wave of their own over it.
+                    if !admin
+                        && self
+                            .station
+                            .as_ref()
+                            .is_some_and(|(_, owner)| owner.is_some_and(|owner| owner != from))
                     {
                         return Err("station_taken");
                     }
                     self.station = Some((id, Some(from)));
-                    Changed::STATE
+                    Changed::STATION
                 }
                 None => {
-                    // Only the feeder may switch the wave off. A peer that never
-                    // fed it saying "off" is a stale echo, not a decision.
-                    if self
+                    // Only the feeder may switch the wave off, and the admin. A
+                    // peer that never fed it saying "off" is a stale echo, not a
+                    // decision.
+                    let feeds = self
                         .station
                         .as_ref()
-                        .is_none_or(|(_, owner)| *owner != Some(from))
-                    {
+                        .is_some_and(|(_, owner)| *owner == Some(from));
+                    if self.station.is_none() || !(feeds || admin) {
                         return Ok(Changed::NOTHING);
                     }
                     self.station = None;
-                    Changed::STATE
+                    Changed::STATION
                 }
             },
+            Command::HandStation { to } => {
+                let Some((_, owner)) = self.station.as_ref() else {
+                    return Err("no_station");
+                };
+                if !(admin || *owner == Some(from)) {
+                    return Err("not_admin");
+                }
+                let Some(member) = self.members.get(&to) else {
+                    return Err("no_such_peer");
+                };
+                if member.plus == Some(false) {
+                    return Err("no_plus");
+                }
+                if *owner == Some(to) {
+                    return Ok(Changed::NOTHING);
+                }
+                if let Some((_, owner)) = self.station.as_mut() {
+                    *owner = Some(to);
+                }
+                Changed::STATION
+            }
+            Command::SetAdmin { peer } => {
+                if !admin {
+                    return Err("not_admin");
+                }
+                let Some(member) = self.members.get(&peer) else {
+                    return Err("no_such_peer");
+                };
+                if member.client_id.is_empty() {
+                    return Err("old_client");
+                }
+                if self.is_admin(peer) {
+                    return Ok(Changed::NOTHING);
+                }
+                self.admin = Some(member.client_id.clone());
+                self.admin_away_since = None;
+                // Only the list moves; the playhead does not, so no new `seq`.
+                return Ok(Changed::ROSTER);
+            }
         };
 
         Ok(self.bump(changed))
@@ -983,6 +1158,31 @@ impl Room {
                 state: self.state.snapshot(),
             });
         }
+        if changed.roster {
+            self.publish_roster();
+        }
+    }
+
+    /// Sends a frame to one peer, if it is here.
+    fn tell(&self, peer: u64, msg: &ServerMsg) {
+        if let Some(peer) = self.peers.get(&peer) {
+            let _ = peer.tx.send(encode(msg));
+        }
+    }
+
+    /// The room as somebody choosing where to go sees it.
+    fn listing(&self, name: &str) -> RoomListing {
+        RoomListing {
+            name: name.to_string(),
+            listeners: self.roster().into_iter().map(|entry| entry.name).collect(),
+            track: self
+                .state
+                .queue
+                .get(self.state.index)
+                .map(|track| format!("{} — {}", track.artist, track.title)),
+            playing: self.state.playing || self.state.barrier.is_some(),
+            wave: self.state.station.is_some(),
+        }
     }
 
     /// Everyone currently offering to serve cached tracks.
@@ -1004,6 +1204,9 @@ impl Room {
             .map(|(id, peer)| RosterEntry {
                 peer: *id,
                 name: peer.name.clone(),
+                admin: self.state.is_admin(*id),
+                plus: self.state.members.get(id).and_then(|member| member.plus),
+                feeds: self.state.feeder() == Some(*id),
             })
             .collect();
         // Ids are handed out in arrival order, so this is also «who came first».
@@ -1039,6 +1242,12 @@ fn error_message(code: &str) -> &'static str {
         "end_of_queue" => "это последний трек в очереди",
         "station_taken" => "волну в этой комнате уже ведёт другой участник",
         "station_owned" => "волну ведёт другой участник: менять очередь и режим может только он",
+        "needs_plus" => "без Плюса волну включить нельзя: её включает участник с подпиской",
+        "no_plus" => "у этого участника нет Плюса: вести волну он не может",
+        "no_station" => "в комнате не играет волна",
+        "not_admin" => "это может только админ комнаты",
+        "no_such_peer" => "этого участника уже нет в комнате",
+        "old_client" => "у этого участника старая версия мода: админом его не сделать",
         "too_many_shares" => "слишком много треков в одном объявлении о раздаче",
         _ => "команда отклонена",
     }
@@ -1070,6 +1279,10 @@ async fn advance_ended_tracks(rooms: Rooms, mut shutdown: watch::Receiver<bool>)
             if room.state.expire_barrier(now) {
                 debug!(room = %name, "not everyone was ready in time; starting anyway");
                 room.publish(Changed::STATE);
+            }
+            if room.state.expire_admin(now) {
+                info!(room = %name, "admin away too long; the role passes on");
+                room.publish_roster();
             }
         }
 
@@ -1138,7 +1351,32 @@ async fn session(
         Ok(Some(msg)) => msg,
     };
 
-    let (room_name, client, name, reports_ready) = match hello {
+    let (room_name, client, name, reports_ready, client_id, plus) = match hello {
+        // Not a member of anything: the list, and goodbye. The password is
+        // asked for because the names of rooms and of who is in them are the
+        // room's business, unlike the bare counts LAN discovery hands out.
+        ClientMsg::ListRooms {
+            protocol,
+            token: given,
+        } => {
+            if protocol != PROTOCOL_VERSION {
+                reject(
+                    tx,
+                    "protocol",
+                    &format!("relay speaks protocol {PROTOCOL_VERSION}, client speaks {protocol}"),
+                );
+                return Ok(());
+            }
+            if !secret_eq(token, &given) {
+                warn!(peer = id, %addr, "rejected room list: bad token");
+                reject(tx, "unauthorized", "bad room token");
+                return Ok(());
+            }
+            let _ = tx.send(encode(&ServerMsg::Rooms {
+                rooms: listings(rooms).await,
+            }));
+            return Ok(());
+        }
         ClientMsg::Hello {
             protocol,
             room,
@@ -1146,6 +1384,8 @@ async fn session(
             client,
             name,
             reports_ready,
+            client_id,
+            plus,
         } => {
             if protocol != PROTOCOL_VERSION {
                 reject(
@@ -1164,7 +1404,8 @@ async fn session(
                 reject(tx, "bad_room", "room must be 1..=64 characters");
                 return Ok(());
             }
-            (room, client, clean_name(&name), reports_ready)
+            let client_id: String = client_id.trim().chars().take(64).collect();
+            (room, client, clean_name(&name), reports_ready, client_id, plus)
         }
         _ => {
             reject(tx, "expected_hello", "first message must be hello");
@@ -1192,6 +1433,7 @@ async fn session(
         if reports_ready {
             room.state.reporter_joined(id);
         }
+        room.state.member_joined(id, client_id, plus);
         let peers = room.peers.len();
 
         for (other_id, peer) in &room.peers {
@@ -1247,6 +1489,7 @@ async fn session(
             .is_some_and(|peer| peer.share.is_some());
         // Nobody waits for a peer that is gone.
         let released = room.state.peer_left(id, unix_ms());
+        room.state.member_left(id, unix_ms());
 
         // The wave outlives its feeder. Dropping the claim outright used to mean
         // the room played out what was queued and then sat in silence for good —
@@ -1336,15 +1579,45 @@ async fn pump(
                 let Some(room) = guard.get_mut(room_name) else {
                     continue;
                 };
+                let feeder_before = room.state.feeder();
+                // A feeder handing its own wave on has to hear it went too; one
+                // switching its own wave off already knows.
+                let handing = matches!(command, Command::HandStation { .. });
                 match room.state.apply(command, id, unix_ms()) {
                     Ok(changed) => {
                         room.publish(changed);
+                        let station = room.state.station.as_ref().map(|(id, _)| id.clone());
+                        let feeder = room.state.feeder();
+                        // The admin switched the wave off or gave it away, or it
+                        // was handed on: whoever fed it has to stop, and hear why.
+                        if let Some(before) = feeder_before
+                            && (before != id || handing)
+                            && feeder != Some(before)
+                        {
+                            room.tell(
+                                before,
+                                &ServerMsg::Station {
+                                    id: station.clone(),
+                                    yours: false,
+                                    taken: true,
+                                },
+                            );
+                        }
+                        // Handed to somebody — the admin's own self included: they
+                        // start feeding it from their own account.
+                        if let (Some(feeder), Some(station)) = (feeder, station.as_ref())
+                            && (feeder != id || handing)
+                            && Some(feeder) != feeder_before
+                        {
+                            room.tell(feeder, &ServerMsg::TakeStation { id: station.clone() });
+                        }
                         if station_claim {
                             // Only the claimant needs to know it won: it is the
                             // one that has to start feeding.
                             let _ = tx.send(encode(&ServerMsg::Station {
-                                id: room.state.station.as_ref().map(|(id, _)| id.clone()),
+                                id: station,
                                 yours: true,
+                                taken: false,
                             }));
                         }
                     }
@@ -1354,6 +1627,7 @@ async fn pump(
                             let _ = tx.send(encode(&ServerMsg::Station {
                                 id: room.state.station.as_ref().map(|(id, _)| id.clone()),
                                 yours: false,
+                                taken: false,
                             }));
                         }
                         reject(tx, code, error_message(code));
@@ -1423,8 +1697,8 @@ async fn pump(
                 room.publish_roster();
             }
             ClientMsg::Bye => return Ok(()),
-            ClientMsg::Hello { .. } => {
-                debug!(peer = id, "ignoring duplicate hello");
+            ClientMsg::Hello { .. } | ClientMsg::ListRooms { .. } => {
+                debug!(peer = id, "ignoring a second hello");
             }
         }
     }
@@ -2275,5 +2549,149 @@ mod tests {
             .await
             .expect("bind");
         assert!(!server.discoverable());
+    }
+
+    /// A room with an admin (peer 1, «admin»), a listener feeding a wave (peer
+    /// 2) and one more listener (peer 3).
+    fn room_with_a_wave(now: i64) -> RoomState {
+        let mut state = room_with_two_tracks(now);
+        state.member_joined(1, "admin".into(), Some(true));
+        state.member_joined(2, "feeder".into(), Some(true));
+        state.member_joined(3, "guest".into(), Some(true));
+        state
+            .apply(Command::SetStation { id: Some("wave".into()) }, 2, now)
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn whoever_opens_the_room_runs_it() {
+        let mut state = RoomState::default();
+        // A client too old to say who it is cannot be admin; the first that can is.
+        state.member_joined(7, String::new(), None);
+        state.member_joined(8, "first".into(), None);
+        state.member_joined(9, "second".into(), None);
+        assert!(!state.is_admin(7));
+        assert!(state.is_admin(8));
+        assert!(!state.is_admin(9));
+    }
+
+    #[test]
+    fn the_admin_is_still_the_admin_after_reconnecting() {
+        let mut state = RoomState::default();
+        state.member_joined(1, "a".into(), None);
+        state.member_joined(2, "b".into(), None);
+        state.member_left(1, 1_000);
+        state.member_joined(5, "a".into(), None);
+        assert!(state.is_admin(5));
+        assert!(!state.expire_admin(1_000 + ADMIN_GRACE_MS * 2), "back in time: nothing passes on");
+    }
+
+    #[test]
+    fn an_admin_who_does_not_come_back_hands_the_room_on() {
+        let mut state = RoomState::default();
+        state.member_joined(1, "a".into(), None);
+        state.member_joined(2, "b".into(), None);
+        state.member_joined(3, "c".into(), None);
+        state.member_left(1, 1_000);
+        assert!(!state.expire_admin(1_000 + ADMIN_GRACE_MS - 1));
+        assert!(state.expire_admin(1_000 + ADMIN_GRACE_MS));
+        assert!(state.is_admin(2), "the one here longest");
+    }
+
+    #[test]
+    fn the_admin_switches_off_a_wave_somebody_else_feeds() {
+        let mut state = room_with_a_wave(1_000);
+        assert_eq!(
+            state.apply(Command::SetStation { id: None }, 3, 2_000),
+            Ok(Changed::NOTHING),
+            "a listener cannot"
+        );
+        assert!(state.station.is_some());
+        assert_eq!(state.apply(Command::SetStation { id: None }, 1, 2_000), Ok(Changed::STATION));
+        assert!(state.station.is_none());
+        assert_eq!(state.queue.len(), 2, "what was queued still plays");
+    }
+
+    #[test]
+    fn the_admin_hands_the_wave_to_somebody_else() {
+        let mut state = room_with_a_wave(1_000);
+        assert_eq!(state.apply(Command::HandStation { to: 1 }, 3, 2_000), Err("not_admin"));
+        assert_eq!(state.apply(Command::HandStation { to: 3 }, 1, 2_000), Ok(Changed::STATION));
+        assert_eq!(state.feeder(), Some(3));
+        assert_eq!(state.station.as_ref().map(|(id, _)| id.as_str()), Some("wave"), "the same wave");
+        // The new feeder's account picks for the room now, so the queue is theirs.
+        assert_eq!(
+            state.apply(Command::Enqueue { tracks: vec![track("9", 1_000)] }, 2, 3_000),
+            Err("station_owned")
+        );
+        assert!(state.apply(Command::Enqueue { tracks: vec![track("9", 1_000)] }, 3, 3_000).is_ok());
+    }
+
+    #[test]
+    fn the_feeder_may_hand_its_own_wave_on() {
+        let mut state = room_with_a_wave(1_000);
+        assert_eq!(state.apply(Command::HandStation { to: 3 }, 2, 2_000), Ok(Changed::STATION));
+        assert_eq!(state.feeder(), Some(3));
+    }
+
+    #[test]
+    fn a_wave_cannot_go_to_somebody_without_plus() {
+        let mut state = room_with_a_wave(1_000);
+        state.member_joined(4, "free".into(), Some(false));
+        assert_eq!(state.apply(Command::HandStation { to: 4 }, 1, 2_000), Err("no_plus"));
+        assert_eq!(state.apply(Command::HandStation { to: 99 }, 1, 2_000), Err("no_such_peer"));
+        assert_eq!(state.feeder(), Some(2));
+    }
+
+    #[test]
+    fn a_listener_without_plus_cannot_start_a_wave() {
+        let mut state = room_with_two_tracks(1_000);
+        state.member_joined(4, "free".into(), Some(false));
+        assert_eq!(
+            state.apply(Command::SetStation { id: Some("wave".into()) }, 4, 2_000),
+            Err("needs_plus")
+        );
+        // Listening along is everything else: pause, skip, seek.
+        assert!(state.apply(Command::Pause, 4, 2_000).is_ok());
+    }
+
+    #[test]
+    fn the_admin_may_reshape_a_wave_that_is_not_theirs() {
+        let mut state = room_with_a_wave(1_000);
+        assert!(state.apply(Command::PlayIndex { index: 1 }, 1, 2_000).is_ok());
+        assert_eq!(state.apply(Command::PlayIndex { index: 0 }, 3, 2_000), Err("station_owned"));
+    }
+
+    #[test]
+    fn the_admin_passes_the_role_on() {
+        let mut state = room_with_a_wave(1_000);
+        assert_eq!(state.apply(Command::SetAdmin { peer: 3 }, 2, 2_000), Err("not_admin"));
+        let seq = state.seq;
+        assert_eq!(state.apply(Command::SetAdmin { peer: 3 }, 1, 2_000), Ok(Changed::ROSTER));
+        assert!(state.is_admin(3));
+        assert!(!state.is_admin(1));
+        assert_eq!(state.seq, seq, "the playhead did not move");
+    }
+
+    #[test]
+    fn the_room_list_says_who_is_listening_to_what() {
+        let mut room = Room::default();
+        room.state = room_with_two_tracks(1_000);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        room.peers.insert(
+            1,
+            Peer {
+                tx,
+                share: None,
+                name: "Рома".into(),
+            },
+        );
+        let listing = room.listing("дом");
+        assert_eq!(listing.name, "дом");
+        assert_eq!(listing.listeners, ["Рома"]);
+        assert_eq!(listing.track.as_deref(), Some("a — t1"));
+        assert!(listing.playing);
+        assert!(!listing.wave);
     }
 }

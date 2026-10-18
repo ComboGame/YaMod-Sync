@@ -82,6 +82,10 @@ impl Relay {
     }
 
     async fn join_full(&self, token: &str, name: &str, reports_ready: bool) -> Ws {
+        self.join_in("test-room", token, name, reports_ready, "").await
+    }
+
+    async fn join_in(&self, room: &str, token: &str, name: &str, reports_ready: bool, client_id: &str) -> Ws {
         let (mut ws, _) = tokio_tungstenite::connect_async(&self.url)
             .await
             .expect("connect to the relay");
@@ -89,11 +93,13 @@ impl Relay {
             &mut ws,
             &ClientMsg::Hello {
                 protocol: PROTOCOL_VERSION,
-                room: "test-room".to_string(),
+                room: room.to_string(),
                 token: token.to_string(),
                 client: "integration".to_string(),
                 name: name.to_string(),
                 reports_ready,
+                client_id: client_id.to_string(),
+                plus: Some(true),
             },
         )
         .await;
@@ -317,6 +323,8 @@ async fn a_protocol_mismatch_is_reported() {
             client: "integration".to_string(),
             name: String::new(),
             reports_ready: false,
+            client_id: String::new(),
+            plus: None,
         },
     )
     .await;
@@ -602,7 +610,7 @@ async fn the_station_goes_to_whoever_claims_it_first() {
     let mut told_state = false;
     while !(told_yours && told_state) {
         match recv_ignoring_peers(&mut one).await {
-            ServerMsg::Station { id, yours } => {
+            ServerMsg::Station { id, yours, .. } => {
                 assert_eq!(id.as_deref(), Some("wave"));
                 assert!(yours);
                 told_yours = true;
@@ -875,6 +883,8 @@ async fn an_embedded_relay_serves_an_ordinary_client() {
             client: "integration".to_string(),
             name: String::new(),
             reports_ready: false,
+            client_id: String::new(),
+            plus: None,
         },
     )
     .await;
@@ -925,4 +935,88 @@ async fn dropping_the_handle_stops_the_listener() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("the relay kept listening on {url} after its handle was dropped");
+}
+
+
+/// The list of rooms is for those who know the password, like the rooms
+/// themselves, and says who is where.
+#[tokio::test]
+async fn rooms_are_listed_to_whoever_knows_the_password() {
+    let relay = Relay::start().await;
+    let _home = relay.join_in("дом", TOKEN, "Рома", false, "a").await;
+    let _work = relay.join_in("работа", TOKEN, "Лена", false, "b").await;
+    // Both joins have landed once the second one is welcomed.
+    let mut probe = relay.join_in("дом", TOKEN, "Миша", false, "c").await;
+    match recv(&mut probe).await {
+        ServerMsg::Welcome { .. } => {}
+        other => panic!("expected a welcome, got {other:?}"),
+    }
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&relay.url).await.expect("connect");
+    send(&mut ws, &ClientMsg::ListRooms { protocol: PROTOCOL_VERSION, token: "wrong".into() }).await;
+    match recv_any(&mut ws).await {
+        ServerMsg::Error { code, .. } => assert_eq!(code, "unauthorized"),
+        other => panic!("a wrong password must not list anything, got {other:?}"),
+    }
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&relay.url).await.expect("connect");
+    send(&mut ws, &ClientMsg::ListRooms { protocol: PROTOCOL_VERSION, token: TOKEN.into() }).await;
+    match recv_any(&mut ws).await {
+        ServerMsg::Rooms { rooms } => {
+            let names: Vec<&str> = rooms.iter().map(|room| room.name.as_str()).collect();
+            assert_eq!(names, ["дом", "работа"], "the busiest first");
+            assert_eq!(rooms[0].listeners, ["Рома", "Миша"]);
+        }
+        other => panic!("expected the rooms, got {other:?}"),
+    }
+}
+
+/// The admin hands a wave on: its feeder is told to stop, and the listener
+/// it goes to is told to take over.
+#[tokio::test]
+async fn a_handed_wave_reaches_its_new_feeder() {
+    let relay = Relay::start().await;
+    let mut admin = relay.join_in("test-room", TOKEN, "admin", false, "admin-id").await;
+    let mut feeder = relay.join_in("test-room", TOKEN, "feeder", false, "feeder-id").await;
+    let mut guest = relay.join_in("test-room", TOKEN, "guest", false, "guest-id").await;
+    let guest_id = loop {
+        if let ServerMsg::Welcome { you, .. } = recv(&mut guest).await {
+            break you;
+        }
+    };
+    command(&mut feeder, Command::SetStation { id: Some("wave".into()) }).await;
+    loop {
+        if let ServerMsg::Station { yours: true, .. } = recv_ignoring_peers(&mut feeder).await {
+            break;
+        }
+    }
+
+    command(&mut admin, Command::HandStation { to: guest_id }).await;
+    loop {
+        match recv_ignoring_peers(&mut feeder).await {
+            ServerMsg::Station { yours: false, taken: true, id } => {
+                assert_eq!(id.as_deref(), Some("wave"));
+                break;
+            }
+            _ => continue,
+        }
+    }
+    loop {
+        match recv_ignoring_peers(&mut guest).await {
+            ServerMsg::TakeStation { id } => {
+                assert_eq!(id, "wave");
+                break;
+            }
+            _ => continue,
+        }
+    }
+    // The room's list now shows who feeds it.
+    loop {
+        if let ServerMsg::Roster { peers } = recv_any(&mut admin).await
+            && peers.iter().any(|p| p.feeds && p.peer == guest_id)
+        {
+            assert!(peers.iter().any(|p| p.admin && p.name == "admin"));
+            break;
+        }
+    }
 }

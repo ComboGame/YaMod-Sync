@@ -24,7 +24,18 @@ import { toast } from "sonner";
 
 export type SessionState = "stopped" | "connecting" | "connected" | "reconnecting";
 
-export type Listener = { name: string; you: boolean };
+export type Listener = {
+  /** id участника у релея: его называют команды админа. */
+  peer: number;
+  name: string;
+  you: boolean;
+  /** Админ комнаты: может выключить чужую волну, передать её и свои права. */
+  admin: boolean;
+  /** Есть ли у его аккаунта Плюс; null — его клиент не сказал. */
+  plus: boolean | null;
+  /** Он ведёт волну комнаты. */
+  feeds: boolean;
+};
 
 /** Сколько занимает каждый шаг — измерено ядром (см. engine.rs::Latency). */
 export type Latency = {
@@ -75,6 +86,10 @@ export type RoomSnapshot = {
   /** Свежи ли отчёты плеера; если нет — playing лишь догадка. */
   local_live: boolean;
   latency: Latency;
+  /** Вы админ комнаты. */
+  admin: boolean;
+  /** Есть ли у вас Плюс; null — узнать не удалось (тогда считаем, что есть). */
+  has_plus: boolean | null;
 };
 
 export type SyncConfig = {
@@ -96,9 +111,11 @@ export type RoomCommand =
   | { c: "set_queue"; tracks: TrackRef[]; start: number }
   | { c: "enqueue"; tracks: TrackRef[] }
   | { c: "play_next"; tracks: TrackRef[] }
-  | { c: "wave"; seeds?: string[] }
+  | { c: "wave"; seeds?: string[]; fresh?: boolean }
   | { c: "wave_feedback"; kind: FeedbackKind; track_id: string }
   | { c: "stop_wave" }
+  | { c: "hand_wave"; to: number }
+  | { c: "set_admin"; peer: number }
   | { c: "repeat"; mode: "off" | "all" | "one" }
   | { c: "shuffle"; on: boolean }
   | { c: "name"; name: string };
@@ -107,6 +124,14 @@ export type FeedbackKind = "like" | "unlike" | "dislike" | "undislike";
 
 /** Что сказано о волне в строке станции комнаты (см. crates/core/src/station.rs). */
 export type StationInfo = { seeds: string[]; name?: string; description?: string; by?: string };
+
+/** Сид «Моей волны» без пресета (crates/core/src/api.rs::WAVE_STATION). */
+export const PLAIN_WAVE_SEED = "user:onyourwave";
+
+/** Обычная «Моя волна», а не пресет по жанру, артисту или настроению. */
+export function isPlainWave(wave: StationInfo): boolean {
+  return wave.seeds.length === 0 || (wave.seeds.length === 1 && wave.seeds[0] === PLAIN_WAVE_SEED);
+}
 
 export function parseStation(station: string | null): StationInfo | null {
   if (!station) return null;
@@ -407,7 +432,9 @@ function tick() {
   const playing = now.status === "playing" || now.status === "buffering";
   sync?.reportPlayer({
     track_id: now.trackId,
-    position_ms: now.positionMs,
+    // Позиция в плеере ещё прежнего трека (см. sonata.ts::staleAudio): новый
+    // начнётся с нуля.
+    position_ms: now.trackId && sonata.awaitingFreshAudio(now.trackId) ? 0 : now.positionMs,
     playing,
     ended: now.status === "ended",
     ours: ours(now),
@@ -575,16 +602,27 @@ const INTERCEPTS: Record<string, Intercept> = {
  * Пауза, перемотка и пропуск остаются общими (ядро и релей проверяют то же).
  */
 export function waveOwner(room: RoomSnapshot | null): string | null {
-  if (!room?.station || room.station_unfed || room.feeding) return null;
+  // Админ ведёт комнату целиком, и волну тоже: релей и ядро с этим согласны.
+  if (!room?.station || room.station_unfed || room.feeding || room.admin) return null;
   return parseStation(room.station)?.by ?? "другой участник";
 }
+
+/** Без Плюса волну не вести: её треки подбирались бы с вашего аккаунта. */
+export function canStartWave(room: RoomSnapshot | null): boolean {
+  return room?.has_plus !== false;
+}
+
+export const NEEDS_PLUS_TEXT = "Без Плюса волну не включить: её включает участник с подпиской, а вы слушаете вместе со всеми";
 
 /** Действия, которые меняют очередь или режим волны, — не для гостя чужой волны. */
 const OWNER_ONLY = new Set(["playContext", "setEntityByIndex", "injectNext", "injectLast", "inject"]);
 
 let lastRefusal = 0;
 function refuseGuest(owner: string) {
-  const text = `Волну ведёт ${owner}: режим и очередь меняет только он`;
+  refuse(`Волну ведёт ${owner}: режим и очередь меняет только он`);
+}
+
+function refuse(text: string) {
   activity(text);
   // Одно нажатие может вызвать несколько методов плеера подряд.
   if (Date.now() - lastRefusal > 1500) toast(text);
@@ -614,6 +652,10 @@ function installInterceptors(facade: any) {
         refuseGuest(owner);
         return Promise.resolve();
       }
+      if (vibe && !canStartWave(state.room)) {
+        refuse(NEEDS_PLUS_TEXT);
+        return Promise.resolve();
+      }
       const verdict = intercept(args, state.room!);
       if (verdict === "block") return Promise.resolve();
       if (verdict !== "now") hold();
@@ -623,6 +665,28 @@ function installInterceptors(facade: any) {
 }
 
 sonata.onFacade(installInterceptors);
+
+/**
+ * «Встряхнуть Мою волну» в колесе на главной. Сам клиент встряхивает свою
+ * волну мимо фасада плеера, и комната бы этого не заметила. В комнате это
+ * значит то же для волны комнаты: новая сессия с теми же сидами — у того, кто
+ * её ведёт (или у вас, если волны нет). Гостю чужой волны и без Плюса — отказ.
+ */
+function onReshuffleClick(event: MouseEvent) {
+  if (!inRoom()) return;
+  const item = (event.target as Element | null)?.closest?.('[data-test-id="WHEEL_RESHUFFLE_ITEM"]');
+  if (!item || !/встряхнуть/i.test(item.textContent ?? "")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const room = state.room!;
+  const owner = waveOwner(room);
+  if (owner) return refuseGuest(owner);
+  if (!canStartWave(room)) return refuse(NEEDS_PLUS_TEXT);
+  const seeds = parseStation(room.station)?.seeds ?? [];
+  activity("Вы встряхнули волну для всей комнаты");
+  command({ c: "wave", seeds, fresh: true });
+}
+window.addEventListener("click", onReshuffleClick, true);
 
 /**
  * Лайк и дизлайк из приложения. Сам запрос в «Мне нравится» или «Не нравится»

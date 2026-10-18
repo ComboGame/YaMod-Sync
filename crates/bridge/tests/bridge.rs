@@ -1025,6 +1025,16 @@ mod fake_yandex {
 
     /// The same, answering the wave's requests for tracks only after `delay_ms`.
     pub async fn start_slow(track_ms: u64, delay_ms: u64) -> Server {
+        start_full(track_ms, delay_ms, None).await
+    }
+
+    /// An account that says whether it has Плюс; `None` leaves the question
+    /// unanswered, as the other servers do.
+    pub async fn start_for(track_ms: u64, plus: Option<bool>) -> Server {
+        start_full(track_ms, 0, plus).await
+    }
+
+    async fn start_full(track_ms: u64, delay_ms: u64, plus: Option<bool>) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1100,6 +1110,10 @@ mod fake_yandex {
                                 ("200 OK", json!({"result": {"batchId": "batch-n", "sequence": sequence}}))
                             } else if path.ends_with("/feedback") {
                                 ("200 OK", json!({"result": "ok"}))
+                            } else if let (true, Some(plus)) = (path == "/account/status", plus) {
+                                ("200 OK", json!({"result": {
+                                    "account": {"uid": 1, "login": "test"}, "plus": {"hasPlus": plus},
+                                }}))
                             } else {
                                 ("404 Not Found", json!({"error": "not here"}))
                             };
@@ -1372,6 +1386,140 @@ async fn a_listener_cannot_reshape_a_wave_somebody_else_feeds() {
 
     feeder.close(None).await.unwrap();
     guest.stop();
+    relay.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+
+/// The room's admin hands its wave to a friend. The friend's account picks
+/// from then on: when the queue runs low it is the friend's Yandex that is
+/// asked, the queue the room was listening to stays, and the room's list says
+/// who feeds the wave now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wave_handed_on_is_fed_from_the_new_listeners_account() {
+    let mut relay = ymsync_relay::bind("127.0.0.1:0", TOKEN).await.expect("relay");
+    let url = format!("ws://{}", relay.local_addr());
+    let yandex_a = fake_yandex::start_for(4_000, Some(true)).await;
+    let yandex_b = fake_yandex::start_for(4_000, Some(true)).await;
+
+    let start = |app: &sim::App, name: &str, id: &str, base: &str, dir: &std::path::Path| {
+        let mut config = start_config(&url, name, dir);
+        config["config"]["yandex_token"] = json!("test-token");
+        config["config"]["api_base"] = json!(base);
+        config["config"]["client_id"] = json!(id);
+        app.send(config);
+    };
+    let dir_a = temp_dir("hand-admin");
+    let admin = sim::App::start(start_bridge(), sim::Options { load_delay_ms: 100, ..Default::default() });
+    start(&admin, "админ", "client-a", &yandex_a.base, &dir_a);
+    admin.until("admin of the room", 20_000, |seen| seen.snapshot["admin"] == true).await;
+    let dir_b = temp_dir("hand-friend");
+    let friend = sim::App::start(start_bridge(), sim::Options { load_delay_ms: 100, ..Default::default() });
+    start(&friend, "друг", "client-b", &yandex_b.base, &dir_b);
+    friend.until("in the room", 20_000, |seen| seen.snapshot["listeners"].as_array().is_some_and(|l| l.len() == 2)).await;
+    assert_eq!(friend.snapshot()["admin"], false);
+    assert_eq!(friend.snapshot()["has_plus"], true);
+
+    admin.command(json!({"c": "wave"}));
+    admin.until("the admin's wave", 10_000, |seen| seen.snapshot["feeding"] == true && seen.snapshot["room_playing"] == true).await;
+    let revision = admin.snapshot()["queue_revision"].clone();
+
+    let friend_peer = friend.snapshot()["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["you"] == true)
+        .map(|l| l["peer"].clone())
+        .unwrap();
+    admin.command(json!({"c": "hand_wave", "to": friend_peer}));
+    friend.until("feeding it now", 5_000, |seen| seen.snapshot["feeding"] == true).await;
+    admin.until("told it went", 5_000, |seen| {
+        seen.snapshot["feeding"] == false
+            && seen.snapshot["notice"].as_str().is_some_and(|n| n.contains("передали другому"))
+    })
+    .await;
+    friend
+        .until("the wave signed with the friend's name", 5_000, |seen| {
+            seen.snapshot["station"].as_str().is_some_and(|s| s.contains("друг"))
+                && seen.snapshot["listeners"].as_array().is_some_and(|l| l.iter().any(|l| l["you"] == true && l["feeds"] == true))
+        })
+        .await;
+    assert_eq!(friend.snapshot()["queue_revision"], revision, "the room's queue was replaced");
+
+    // The queue runs low; the friend's account tops it up.
+    friend.until("the friend's Yandex asked", 15_000, |_| yandex_b.count("/rotor/session/new") == 1).await;
+    let sessions_a = yandex_a.count("/rotor/session/new");
+    friend
+        .until("the friend's batch in the queue", 5_000, |seen| {
+            seen.snapshot["queue_revision"] != revision
+        })
+        .await;
+    assert_eq!(yandex_a.count("/rotor/session/new"), sessions_a, "the admin's account still asked");
+
+    admin.stop();
+    friend.stop();
+    relay.stop().await;
+    for dir in [dir_a, dir_b] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// An account without Плюс listens along but cannot start a wave: it is told
+/// why, and Yandex is not asked for one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listener_without_plus_hears_the_wave_but_cannot_start_one() {
+    let mut relay = ymsync_relay::bind("127.0.0.1:0", TOKEN).await.expect("relay");
+    let url = format!("ws://{}", relay.local_addr());
+    let yandex = fake_yandex::start_for(60_000, Some(false)).await;
+    let dir = temp_dir("no-plus");
+    let app = sim::App::start(start_bridge(), sim::Options { load_delay_ms: 100, ..Default::default() });
+    let mut config = start_config(&url, "без плюса", &dir);
+    config["config"]["yandex_token"] = json!("test-token");
+    config["config"]["api_base"] = json!(yandex.base);
+    app.send(config);
+    app.until("connected without Плюс", 20_000, |seen| seen.snapshot["has_plus"] == false).await;
+
+    app.command(json!({"c": "wave"}));
+    app.until("told why", 3_000, |seen| seen.snapshot["notice"].as_str().is_some_and(|n| n.contains("без Плюса"))).await;
+    assert_eq!(yandex.count("/rotor/session/new"), 0);
+    assert_eq!(app.snapshot()["feeding"], false);
+
+    // Everything else works as for anybody.
+    app.command(queue_of(&[track_of("p1", 120_000)]));
+    app.until("playing", 10_000, |seen| seen.snapshot["local_track"] == "p1" && seen.snapshot["playing"] == true).await;
+
+    app.stop();
+    relay.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// «Встряхнуть Мою волну»: the same wave asked for afresh opens a new session
+/// and replaces the queue, where asking for it plainly only goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shaking_the_wave_up_opens_a_new_session() {
+    let mut relay = ymsync_relay::bind("127.0.0.1:0", TOKEN).await.expect("relay");
+    let url = format!("ws://{}", relay.local_addr());
+    let yandex = fake_yandex::start(60_000).await;
+    let dir = temp_dir("shake");
+    let app = sim::App::start(start_bridge(), sim::Options { load_delay_ms: 100, ..Default::default() });
+    let mut config = start_config(&url, "встряска", &dir);
+    config["config"]["yandex_token"] = json!("test-token");
+    config["config"]["api_base"] = json!(yandex.base);
+    app.send(config);
+    app.until("connected", 20_000, |seen| seen.statuses.iter().any(|s| s == "connected")).await;
+
+    app.command(json!({"c": "wave"}));
+    app.until("the wave playing", 10_000, |seen| seen.snapshot["feeding"] == true && seen.snapshot["track"]["track_id"] == "v1").await;
+    app.command(json!({"c": "wave"}));
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert_eq!(yandex.count("/rotor/session/new"), 1, "asked plainly, the wave only goes on");
+
+    app.command(json!({"c": "wave", "fresh": true}));
+    app.until("a new batch playing", 10_000, |seen| seen.snapshot["track"]["track_id"] == "v4").await;
+    assert_eq!(yandex.count("/rotor/session/new"), 2);
+    assert_eq!(app.snapshot()["feeding"], true);
+
+    app.stop();
     relay.stop().await;
     let _ = std::fs::remove_dir_all(dir);
 }

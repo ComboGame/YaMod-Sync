@@ -35,7 +35,7 @@ use crate::api::{Track, WaveEvent, WaveSessionLost, YandexMusic};
 use crate::cache::{Cache, Insertion};
 use crate::config::Config;
 use crate::likes::Likes;
-use crate::link::Link;
+use crate::link::{Identity, Link};
 use crate::playback::{AudioSource, Playback};
 use crate::share;
 use crate::station::StationSpec;
@@ -136,14 +136,21 @@ pub enum Command {
     PlayStation { id: String, replace: bool },
     /// «Моя волна» or one of its presets, for the whole room, fed from this
     /// account: the seeds the app passes when the wave or a preset is started.
-    /// None is plain «Моя волна».
-    PlayWave { seeds: Vec<String> },
+    /// None is plain «Моя волна». `fresh` opens a new session even when this
+    /// peer already feeds the same wave — «Встряхнуть Мою волну».
+    PlayWave { seeds: Vec<String>, fresh: bool },
     /// The heart or «не нравится» on a track of the wave this peer feeds, for
     /// its session — the way the app reports them to its own wave. Ignored when
     /// this peer feeds no wave.
     WaveFeedback { track_id: String, kind: WaveFeedbackKind },
-    /// Stops feeding a station. What is already queued still plays.
+    /// Stops feeding a station. What is already queued still plays. From the
+    /// room's admin it also switches off a wave somebody else feeds.
     StopStation,
+    /// Passes the room's wave to another listener, who feeds it from their own
+    /// account from then on. For its feeder and the room's admin.
+    HandWave { to: u64 },
+    /// Makes another listener the room's admin. For the admin.
+    SetAdmin { peer: u64 },
     PlayIndex(usize),
     TogglePause,
     SeekTo(u64),
@@ -284,6 +291,11 @@ pub struct Snapshot {
     /// `playing` is a guess and a front end should not present it as fact.
     pub local_live: bool,
     pub latency: Latency,
+    /// This listener runs the room; see [`Listener::admin`].
+    pub admin: bool,
+    /// Whether this account has Плюс; `None` when that could not be found out.
+    /// Without it the room's wave is heard, not fed.
+    pub has_plus: Option<bool>,
 }
 
 /// Where the time goes between pressing a button and hearing it, measured
@@ -310,9 +322,17 @@ pub struct Latency {
 /// One person in the room, as a front end lists them.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Listener {
+    /// The relay's id for them, which the admin's commands name.
+    pub peer: u64,
     pub name: String,
     /// This is the listener looking at the list.
     pub you: bool,
+    /// They run the room: may switch any wave off, hand it on, and pass the role.
+    pub admin: bool,
+    /// Whether their account has Плюс, when their client said.
+    pub plus: Option<bool>,
+    /// They feed the room's wave.
+    pub feeds: bool,
 }
 
 /// Handle to a running engine. Dropping every clone of the command sender ends
@@ -403,11 +423,16 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
     } = wiring;
 
     let room_token = cfg.require_room_token()?.to_string();
-    let (link, events) = Link::connect(
+    let plus = account_has_plus(api.as_deref()).await;
+    let (link, events) = Link::connect_as(
         &relay_url,
         &cfg.room,
         &room_token,
         &cfg.display_name(),
+        Identity {
+            client_id: cfg.client_id.trim().to_string(),
+            plus,
+        },
         Duration::from_secs(cfg.sync.clock_probe_secs),
     )
     .await?;
@@ -453,6 +478,8 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         local_track: None,
         local_live: true,
         latency: Latency::default(),
+        admin: false,
+        has_plus: plus,
     });
 
     let engine = Engine {
@@ -508,6 +535,7 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         notice_since: None,
         peers,
         connected: true,
+        plus,
         snapshots,
     };
 
@@ -523,6 +551,30 @@ pub async fn spawn(cfg: &Config, wiring: Wiring) -> Result<Handle> {
         task,
     })
 }
+
+/// How long joining a room waits to hear whether the account has Плюс.
+const PLUS_CHECK: Duration = Duration::from_secs(4);
+
+/// Whether the account has Плюс, or `None` when Yandex could not be asked in
+/// time. Unknown is treated as yes everywhere: a slow network must not cost a
+/// subscriber their wave, and the wave itself fails loudly without Плюс anyway.
+async fn account_has_plus(api: Option<&YandexMusic>) -> Option<bool> {
+    let api = api?;
+    match tokio::time::timeout(PLUS_CHECK, api.account_status()).await {
+        Ok(Ok(status)) => Some(status.plus.is_some_and(|plus| plus.has_plus)),
+        Ok(Err(err)) => {
+            debug!("не удалось узнать, есть ли Плюс: {err:#}");
+            None
+        }
+        Err(_) => {
+            debug!("Яндекс не ответил, есть ли Плюс");
+            None
+        }
+    }
+}
+
+/// Said when a listener without Плюс tries to start a wave.
+const NEEDS_PLUS: &str = "без Плюса волну не включить: её включает участник с подпиской, а вы слушаете вместе со всеми";
 
 /// Result of a background track fetch.
 enum Internal {
@@ -1007,6 +1059,8 @@ struct Engine {
     notice_since: Option<std::time::Instant>,
     peers: usize,
     connected: bool,
+    /// Whether this account has Плюс, as Yandex said on connecting.
+    plus: Option<bool>,
 
     snapshots: watch::Sender<Snapshot>,
 }
@@ -1095,7 +1149,8 @@ impl Engine {
     fn wave_led_by_another(&self) -> Option<String> {
         let remote = self.remote.as_ref()?;
         let station = remote.station.as_ref()?;
-        if remote.station_unfed || self.station.is_some() {
+        // The admin runs the room, its wave included; the relay agrees.
+        if remote.station_unfed || self.station.is_some() || self.is_admin() {
             return None;
         }
         Some(StationSpec::parse(station).by.unwrap_or_else(|| "другой участник".to_string()))
@@ -1137,6 +1192,10 @@ impl Engine {
             }
 
             Command::PlayStation { id, replace } => {
+                if self.plus == Some(false) {
+                    self.notice = Some(NEEDS_PLUS.to_string());
+                    return;
+                }
                 self.notice = Some("настраиваю волну…".to_string());
                 self.station_generation += 1;
                 self.station = Some(Station::new(id, replace, self.station_generation));
@@ -1144,16 +1203,18 @@ impl Engine {
                 self.request_station_tracks(internal);
             }
 
-            Command::PlayWave { seeds } => {
+            Command::PlayWave { seeds, fresh } => {
                 let spec = StationSpec::from_seeds(seeds, &self.name);
                 // The wave this peer already feeds, asked for again: the app's
                 // «Моя волна» button pressed while it plays here. Starting over
                 // would throw the session away and replace everyone's queue
-                // mid-track; what is meant is «play it».
-                let same = self
-                    .station
-                    .as_ref()
-                    .is_some_and(|station| StationSpec::parse(&station.id).seeds == spec.seeds);
+                // mid-track; what is meant is «play it». Unless a shake-up is
+                // what was asked for.
+                let same = !fresh
+                    && self
+                        .station
+                        .as_ref()
+                        .is_some_and(|station| StationSpec::parse(&station.id).seeds == spec.seeds);
                 if same {
                     if self.remote.as_ref().is_some_and(|state| !state.playing && state.waiting.is_none()) {
                         self.ask(ymsync_proto::Command::Resume);
@@ -1174,8 +1235,13 @@ impl Engine {
             Command::StopStation => {
                 if self.station.take().is_some() {
                     self.ask(ymsync_proto::Command::SetStation { id: None });
+                } else if self.is_admin() && self.remote.as_ref().is_some_and(|state| state.station.is_some()) {
+                    self.ask(ymsync_proto::Command::SetStation { id: None });
                 }
             }
+
+            Command::HandWave { to } => self.ask(ymsync_proto::Command::HandStation { to }),
+            Command::SetAdmin { peer } => self.ask(ymsync_proto::Command::SetAdmin { peer }),
 
             Command::PlayIndex(index) => self.ask(ymsync_proto::Command::PlayIndex { index }),
             Command::Next => self.ask(ymsync_proto::Command::Next),
@@ -2150,18 +2216,25 @@ impl Engine {
                 );
             }
 
-            Event::Station { id, yours } => {
+            Event::Station { id, yours, taken } => {
                 if yours {
                     if let Some(station) = self.station.as_mut() {
                         station.claimed = true;
                     }
                 } else if self.station.take().is_some() {
-                    self.notice = Some(match id {
-                        Some(_) => "волну в этой комнате уже ведёт другой участник".to_string(),
-                        None => "волна выключена".to_string(),
-                    });
+                    self.notice = Some(
+                        match (id, taken) {
+                            (Some(_), true) => "волну передали другому участнику: дальше она подбирается для него",
+                            (None, true) => "админ комнаты выключил волну",
+                            (Some(_), false) => "волну в этой комнате уже ведёт другой участник",
+                            (None, false) => "волна выключена",
+                        }
+                        .to_string(),
+                    );
                 }
             }
+
+            Event::TakeStation { id } => self.take_station(id),
 
             Event::Roster { peers } => {
                 self.roster = peers;
@@ -2203,6 +2276,39 @@ impl Engine {
                 self.notice = Some(format!("релей сообщил об ошибке ({code}): {message}"));
             }
         }
+    }
+
+    /// The wave was handed to this listener: it goes on, fed from this account.
+    ///
+    /// The queue stays as it is — the room keeps listening to what is there —
+    /// and the next batch comes from a session of this account's own, opened
+    /// with the same seeds when the queue runs low. That session is told what
+    /// the room already has, so it does not hand the same tracks out again.
+    fn take_station(&mut self, id: String) {
+        if self.plus == Some(false) || self.api.is_none() {
+            // Nobody else is feeding it now, so saying no ends the wave; what is
+            // queued still plays.
+            self.notice = Some("вам передали волну, но с этого аккаунта её не вести: нужен Плюс".to_string());
+            self.ask(ymsync_proto::Command::SetStation { id: None });
+            return;
+        }
+        let mut spec = StationSpec::parse(&id);
+        spec.by = Some(self.name.clone()).filter(|name| !name.is_empty());
+        self.station_generation += 1;
+        let mut station = Station::new(spec.encode(), false, self.station_generation);
+        let skip = self.queue.len().saturating_sub(WAVE_MEMORY);
+        station
+            .wave
+            .played
+            .extend(self.queue.iter().skip(skip).map(wave_track_id));
+        station.after = self.queue.last().map(|track| track.track_id.clone());
+        let claim = station.id.clone();
+        self.station = Some(station);
+        self.refilling = false;
+        self.notice = Some("вам передали волну: дальше она подбирается для вашего аккаунта".to_string());
+        // The relay already counts this peer as the feeder; this only puts the
+        // new feeder's name on the wave, and confirms the claim.
+        self.ask(ymsync_proto::Command::SetStation { id: Some(claim) });
     }
 
     /// Takes the room's new state's timings: how long the relay took to answer
@@ -2311,7 +2417,11 @@ impl Engine {
         // to offer it — the relay starts without us if that takes too long.
         // Alone, there is nobody to wait for.
         let cannot = self.unavailable.contains(id) || self.set_aside(id);
-        let alone = self.roster.len() <= 1;
+        // Nobody to wait for either when nobody in the room shares anything: a
+        // relay on the internet brokers no sharing at all, and the app's player
+        // shares nothing, so waiting there only held the room for the whole
+        // timeout on every track this account cannot play.
+        let alone = self.roster.len() <= 1 || self.shares.iter().all(|share| share.tracks.is_empty());
         if !(staged || (cannot && alone)) {
             return;
         }
@@ -2657,8 +2767,12 @@ impl Engine {
                 .roster
                 .iter()
                 .map(|entry| Listener {
+                    peer: entry.peer,
                     name: entry.name.clone(),
                     you: entry.peer == self.link.you(),
+                    admin: entry.admin,
+                    plus: entry.plus,
+                    feeds: entry.feeds,
                 })
                 .collect(),
             repeat: self.remote.as_ref().map_or(RepeatMode::Off, |state| state.repeat),
@@ -2673,7 +2787,15 @@ impl Engine {
                 rtt_last_ms: self.link.clock().last_rtt_ms(),
                 ..self.latency.clone()
             },
+            admin: self.is_admin(),
+            has_plus: self.plus,
         });
+    }
+
+    /// Whether the room's list names this listener its admin.
+    fn is_admin(&self) -> bool {
+        let you = self.link.you();
+        self.roster.iter().any(|entry| entry.peer == you && entry.admin)
     }
 
     /// Every track id the room can supply without the internet, deduplicated.

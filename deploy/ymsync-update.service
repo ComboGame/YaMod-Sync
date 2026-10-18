@@ -1,0 +1,12 @@
+# Обновление релея YandexMusicSync из GitHub (см. deploy/auto-update.sh).
+# Установка — docs/server.md, раздел «Автообновление».
+[Unit]
+Description=YandexMusicSync relay: update from GitHub
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/yamod-sync
+ExecStart=/bin/bash /opt/yamod-sync/deploy/auto-update.sh

@@ -31,6 +31,10 @@ pub struct StartConfig {
     pub password: String,
     #[serde(default)]
     pub name: String,
+    /// This installation's id, kept by the mod; how the room recognises its
+    /// admin after a reconnect.
+    #[serde(default)]
+    pub client_id: String,
     /// This account's OAuth token, as the app holds it.
     #[serde(default)]
     pub yandex_token: String,
@@ -75,10 +79,17 @@ pub enum UiCommand {
     Wave {
         #[serde(default)]
         seeds: Vec<String>,
+        /// A new session even for the wave already playing: «Встряхнуть».
+        #[serde(default)]
+        fresh: bool,
     },
     /// The heart or «не нравится» on a track, for the wave this peer feeds.
     WaveFeedback { kind: FeedbackKind, track_id: String },
     StopWave,
+    /// Passes the wave to the listener with this relay id.
+    HandWave { to: u64 },
+    /// Makes the listener with this relay id the room's admin.
+    SetAdmin { peer: u64 },
     Repeat { mode: RepeatMode },
     Shuffle { on: bool },
     Name { name: String },
@@ -218,10 +229,10 @@ mod tests {
             serde_json::from_str(r#"{"t":"command","command":{"c":"seek","ms":5000}}"#).unwrap();
         assert!(matches!(input, Input::Command { command: UiCommand::Seek { ms: 5000 } }));
         let input: Input = serde_json::from_str(r#"{"t":"command","command":{"c":"wave"}}"#).unwrap();
-        assert!(matches!(input, Input::Command { command: UiCommand::Wave { seeds } } if seeds.is_empty()));
+        assert!(matches!(input, Input::Command { command: UiCommand::Wave { seeds, fresh: false } } if seeds.is_empty()));
         let input: Input =
             serde_json::from_str(r#"{"t":"command","command":{"c":"wave","seeds":["genre:rnb"]}}"#).unwrap();
-        assert!(matches!(input, Input::Command { command: UiCommand::Wave { seeds } } if seeds == ["genre:rnb"]));
+        assert!(matches!(input, Input::Command { command: UiCommand::Wave { seeds, .. } } if seeds == ["genre:rnb"]));
         let input: Input = serde_json::from_str(
             r#"{"t":"command","command":{"c":"wave_feedback","kind":"dislike","track_id":"42"}}"#,
         )

@@ -24,6 +24,19 @@ export function saveSyncConfig(config: SyncConfig) {
   window.yandexMusicMod.setStorageValue("sync/config", config);
 }
 
+export type RoomListing = { name: string; listeners: string[]; track?: string; playing: boolean; wave?: boolean };
+
+/** Комнаты сервера — тому, кто знает его пароль (запрос идёт из main-процесса). */
+export async function listRooms(relay: string, password: string): Promise<{ ok: true; rooms: RoomListing[] } | { ok: false; error: string }> {
+  const sync = window.yandexMusicMod?.sync;
+  if (!sync?.rooms) return { ok: false, error: "список комнат недоступен в этом окне" };
+  try {
+    return await sync.rooms(relay, password);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function setAutoConnect(on: boolean) {
   window.yandexMusicMod.setStorageValue("sync/autoConnect", on);
 }

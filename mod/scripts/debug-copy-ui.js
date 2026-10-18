@@ -29,7 +29,14 @@ fs.writeFileSync(rendererPath, `(function () {\n${fs.readFileSync(rendererPath, 
 
 const modRoot = path.join(".versions", latest, "mod");
 const common = { bundle: true, format: "cjs", external: ["electron"], logLevel: "warning" };
-await build({ ...common, entryPoints: ["src/mod/main.ts"], outfile: "src/mod/dist/main.js", platform: "node", target: "node22" });
+await build({
+  ...common,
+  entryPoints: ["src/mod/main.ts"],
+  outfile: "src/mod/dist/main.js",
+  platform: "node",
+  target: "node22",
+  define: { __MOD_VERSION__: JSON.stringify(fs.readFileSync("VERSION", "utf8").trim()) },
+});
 await build({ ...common, entryPoints: ["src/mod/preload.ts"], outfile: "src/mod/dist/preload.js", platform: "browser" });
 fs.copyFileSync("src/mod/dist/main.js", path.join(modRoot, "yandexMusicMod-main.js"));
 // preload.js приложения — нетронутый из .versions/<версия>/src плюс наш.

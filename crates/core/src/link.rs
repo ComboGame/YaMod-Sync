@@ -105,12 +105,32 @@ pub struct Link {
     tasks: Vec<JoinHandle<()>>,
 }
 
+/// Who this peer is to the room, beyond its name.
+#[derive(Debug, Clone, Default)]
+pub struct Identity {
+    /// See [`crate::config::Config::client_id`].
+    pub client_id: String,
+    /// Whether the account has Плюс, if that is known.
+    pub plus: Option<bool>,
+}
+
 impl Link {
     pub async fn connect(
         relay: &str,
         room: &str,
         room_token: &str,
         name: &str,
+        probe_every: Duration,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Event>)> {
+        Self::connect_as(relay, room, room_token, name, Identity::default(), probe_every).await
+    }
+
+    pub async fn connect_as(
+        relay: &str,
+        room: &str,
+        room_token: &str,
+        name: &str,
+        identity: Identity,
         probe_every: Duration,
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>)> {
         let (ws, _response) = tokio_tungstenite::connect_async(relay)
@@ -133,6 +153,8 @@ impl Link {
                 client: client_name(),
                 name: name.to_string(),
                 reports_ready: true,
+                client_id: identity.client_id,
+                plus: identity.plus,
             },
         )
         .await?;
@@ -377,12 +399,13 @@ fn as_event(msg: ServerMsg) -> Option<Event> {
         ServerMsg::State { state } => Some(Event::State(state)),
         ServerMsg::Queue { revision, tracks } => Some(Event::Queue { revision, tracks }),
         ServerMsg::Peer { joined, peers } => Some(Event::Peer { joined, peers }),
-        ServerMsg::Station { id, yours } => Some(Event::Station { id, yours }),
+        ServerMsg::Station { id, yours, taken } => Some(Event::Station { id, yours, taken }),
+        ServerMsg::TakeStation { id } => Some(Event::TakeStation { id }),
         ServerMsg::Shares { peers } => Some(Event::Shares { peers }),
         ServerMsg::Roster { peers } => Some(Event::Roster { peers }),
         ServerMsg::Error { code, message } => Some(Event::Error { code, message }),
         // Handled where the connection is set up, and meaningless afterwards.
-        ServerMsg::Welcome { .. } | ServerMsg::TimeRes { .. } => None,
+        ServerMsg::Welcome { .. } | ServerMsg::TimeRes { .. } | ServerMsg::Rooms { .. } => None,
     }
 }
 

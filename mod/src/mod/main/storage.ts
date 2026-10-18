@@ -20,6 +20,13 @@ function writeSettings(settings: Record<string, unknown>) {
   fs.writeFileSync(settingsFilePath(), JSON.stringify(settings, null, 2));
 }
 
+/** Запись одной настройки из main-процесса. */
+export function writeSetting(key: string, value: unknown) {
+  const settings = readSettings();
+  settings[key] = value;
+  writeSettings(settings);
+}
+
 export function setupStorage() {
   ipcMain.handle("yandexMusicMod.getStorageValue", (_event, key: string) => {
     const value = readSettings()[key];

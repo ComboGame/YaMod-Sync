@@ -205,6 +205,8 @@ export async function processBuild(build: AppBuild, options: ProcessOptions) {
     format: "cjs",
     external: ["electron"],
     logLevel: "warning",
+    // Версия мода — для проверки обновлений (main/updater.ts).
+    define: { __MOD_VERSION__: JSON.stringify(fs.readFileSync(path.join(__projectRoot, "VERSION"), "utf8").trim()) },
   });
 
   fs.copyFileSync(path.join(modCompiledDir, "main.js"), path.join(buildModdedDir, "yandexMusicMod-main.js"));

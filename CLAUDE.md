@@ -40,7 +40,7 @@ deploy/, Dockerfile, docker-compose.yml, docs/server.md   развёртыван
 ## Команды
 
 ```bash
-cargo test --workspace                  # ~290 тестов; в crates/bridge/tests — симулятор приложения
+cargo test --workspace                  # ~310 тестов; в crates/bridge/tests — симулятор приложения
                                         # (sim::App) и подставной API Яндекса (fake_yandex) для волны
 cargo build --release -p ymsync-relay   # сервер
 ```
@@ -117,6 +117,22 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
   `shuffle`, новая волна от остальных отклоняются (релей — `station_owned`, ядро — `wave_led_by_another`,
   мод — `controller.ts::waveOwner` + `OWNER_ONLY`, колесо на главной неактивно). Пауза, перемотка, пропуск —
   общие. Ушёл кормящий (`station_unfed`) — волна снова общая.
+- Дополнения к протоколу 6 (номер не менялся: всё — необязательные поля и сообщения, старые стороны их
+  игнорируют): в `hello` — `client_id` (постоянный id установки, main хранит `sync/clientId`) и `plus`;
+  `RosterEntry.{admin, plus, feeds}`; `Command::HandStation{to}`, `Command::SetAdmin{peer}`;
+  `ServerMsg::Station.taken`, `ServerMsg::TakeStation{id}`; `ClientMsg::ListRooms{protocol, token}` вместо hello →
+  `ServerMsg::Rooms{rooms: [RoomListing]}` и закрытие (старый релей молчит до таймаута hello).
+- Админ комнаты (`RoomState::{admin, members}`): первая установка с `client_id`, вошедшая в комнату; узнаётся
+  после переподключения по `client_id`; ушёл дольше `ADMIN_GRACE_MS` (10 мин) — права у того, кто дольше всех
+  в комнате. Может: `SetStation{None}` для чужой волны, `HandStation` (и кормящий — для своей), `SetAdmin`,
+  менять очередь чужой волны (`station_owned` к нему не применяется). Получатель `TakeStation` кормит волну со
+  своего аккаунта (`engine::take_station`: очередь не трогается, новая сессия с теми же сидами при подходе к
+  концу, в `played` — хвост очереди комнаты); прежний кормящий получает `Station{taken: true}`.
+- Плюс: ядро спрашивает `account/status` до подключения (`account_has_plus`, 4 с; не узнали — `None`, считаем
+  «есть»). Без Плюса: `PlayWave`/`PlayStation` — отказ (`NEEDS_PLUS`), релей отвечает `needs_plus` на
+  `SetStation` и `no_plus` на передачу такому участнику. Слушать волну других можно. Трек, который аккаунт не
+  может сыграть, не держит барьер, если в комнате никто ничего не раздаёт (`report_ready`).
+- `PlayWave{seeds, fresh}`: `fresh` — новая сессия даже для той же волны («Встряхнуть Мою волну»).
 
 ### Мост ↔ мод (`crates/bridge/src/protocol.rs`)
 
@@ -132,8 +148,15 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
 - `RemotePlayback::load` ждёт `loaded` до 15 с; позиция экстраполируется между отчётами (не дольше 2 с).
 - Повторный `start` с той же конфигурацией (перезагруженное окно) → заново `connected`, очередь, снапшот и
   `load`. Отказ от такого `load` снимает «поставленный» трек, и движок ставит его снова.
-- IPC: `yandexSync.start|stop|state|resume` (invoke), `yandexSync.command|player|loaded` (send), события
-  `yandexSync.event`. Main помнит последний статус моста и последний `start`: перезагруженное окно спрашивает
+- IPC: `yandexSync.start|stop|state|resume|rooms` (invoke; `rooms(relay, password)` — короткое WebSocket-соединение
+  из main с `list_rooms`), `yandexSync.command|player|loaded` (send), события `yandexSync.event`. Команды
+  моста ещё `hand_wave {to}`, `set_admin {peer}`, у `wave` — `fresh`.
+- Обновления мода — `main/updater.ts`: релизы `mod-v*` на GitHub (`ComboGame/YaMod-Sync`, без токена), сравнение
+  с `__MOD_VERSION__` (esbuild `define` из `mod/VERSION` в patcher и `ui:dev`), первая проверка через 15 с, потом
+  раз в 6 ч. «Обновить» качает установщик в temp, сверяет SHA-256 с `SHA256SUMS.txt` и запускает его, закрыв
+  приложение. IPC `modUpdate.state|check|install`, событие `modUpdate.event`; в окне — `ui/hooks/use-update.ts`,
+  кнопка в верхней панели, тост один раз на версию (`update/notified`), экран настроек «Обновления» показывает
+  раздел «Что нового» из заметок релиза. Main помнит последний статус моста и последний `start`: перезагруженное окно спрашивает
   `state` и делает `resume` (тот же `start` ещё раз) — мост всё это время оставался в комнате.
   Настройки мода — `yandexMusicMod.get/setStorageValue`, файл `userData/mod_settings.json`.
 
@@ -159,6 +182,14 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
 - `setEntityByIndex`/`setContext` завершаются раньше подмены источника звука (~0,4 с плеер показывает новый id,
   но длительность и звук старого трека): `loaded` уходит только после `waitUntilOn` (длительность совпала с
   треком очереди или 0). Иначе play/seek ядра доставались старому треку.
+- `setContext` на паузе (смена режима волны, пока играла прежняя) меняет трек, но не звук: позиция, длительность
+  и аудио — прежние, пока не вызвать `play()`; `resume()` продолжал старый звук. `sonata.ts::staleAudio`: после
+  своего `setContext` `waitUntilOn` не ждёт длительности, `play()` вызывает именно `play()`, перемотка
+  откладывается до звука, а отчёт плееру даёт позицию 0.
+- Колесо на главной: `WHEEL_VIBE_ITEM` — режимы (`playContext` vibe с `seeds`), `WHEEL_RESHUFFLE_ITEM` — «Назад к
+  привычному» (`playContext` с `user:onyourwave`, становится обычной волной комнаты) и «Встряхнуть Мою волну»
+  (мимо фасада; мод ловит клик в capture на window → `wave {seeds, fresh: true}`). Пункты стоят на абсолютных
+  позициях — скрытый оставляет дыру, поэтому не скрываются.
 - Позиция Sonata обновляется раз в ~265 мс → `progress.onChange` + досчёт (`livePositionMs`).
 - Действия пользователя ловятся перехватом методов фасада (`controller.ts::INTERCEPTS`); свои вызовы — в `asMod()`
   (флаг только на синхронную часть вызова). Аргумент «id воспроизведения» = трейлер/клип, не трогать.
@@ -181,8 +212,8 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
   буквы в полях мода. `lib/shadow.tsx::guardModInputs` останавливает клавиши из полей мода на window
   (capture), кроме Escape и Tab.
 - Очередь комнаты в плеере — контекст `various`, и главная клиента принимает его за «волну по треку»
-  (подпись трека с крестиком, «Назад к привычному» в колесе). В комнате это скрыто (`client-tweaks.ts`,
-  классы `ymsync-in-room`/`ymsync-wave-guest` на `<html>` и `--ymsync-room-label`), сверху — волна комнаты.
+  (подпись трека с крестиком). В комнате подпись скрыта (`client-tweaks.ts`, классы `ymsync-in-room`/
+  `ymsync-wave-guest` на `<html>` и `--ymsync-room-label`), сверху — волна комнаты; пункты колеса — см. выше.
 - Иконки — `mod/branding/` (зелёная звезда, `scripts/green-icons.py` из иконок клиента); патчер кладёт их
   поверх `assets` клиента, `icon.ico` — окно, ярлык, установщик.
 
@@ -226,6 +257,8 @@ node_modules/electron/dist/electron.exe .versions/<v>/mod --remote-debugging-por
 
 ## Известные проблемы и грабли
 
+- Список комнат и админ работают только с новым релеем; со старым список отвечает «введите название сами»
+  (через 6 с), а админа нет. Без Плюса на живом аккаунте не проверено: что сыграет плеер, решает Яндекс.
 - Релей с естественным переходом без барьера и `NATURAL_GAP_MS` нужно пересобрать на сервере (`docker compose
   build`): со старым релеем мод работает, но на каждом переходе трека снова ждёт готовности всех.
 - Зазор 450 мс — замер на клиенте 5.123; у другой версии он может быть другим (смотреть расхождение сразу

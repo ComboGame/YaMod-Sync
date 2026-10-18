@@ -4,8 +4,10 @@ import { setupStorage } from "./main/storage";
 import { blockAnalytics } from "./main/analytics";
 import { startDiscordRpc } from "./main/discord-rpc";
 import { setupYandexSync } from "./main/yandex-sync";
+import { setupUpdater } from "./main/updater";
 
 setupStorage();
 blockAnalytics();
 setupYandexSync();
+setupUpdater();
 startDiscordRpc();

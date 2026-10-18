@@ -260,7 +260,26 @@ export async function stageQueue(contextId: string, ids: string[], index: number
         loadContextMeta: false,
       }),
     );
+    // Звук прежнего трека ещё в плеере: см. staleAudio.
+    staleAudio = { trackId: ids[index] ?? "", pendingSeekMs: null };
   }
+}
+
+/**
+ * setContext на паузе меняет трек в очереди, но не звук: плеер показывает
+ * новый id, а позиция, длительность и аудио — прежнего трека, пока его не
+ * запустят через play(). resume() в этом состоянии продолжал старый звук с его
+ * позиции — отсюда «первый трек режима не загрузился» и «трек начался не с
+ * начала» после смены режима волны, пока играла предыдущая. Пока это так,
+ * play() вызывает именно play(), а перемотка ждёт настоящего звука.
+ */
+let staleAudio: { trackId: string; pendingSeekMs: number | null } | null = null;
+
+/** Плеер стоит на этом треке, но звук в нём ещё прежний (см. staleAudio). */
+export function awaitingFreshAudio(trackId: string): boolean {
+  if (!staleAudio || staleAudio.trackId !== trackId) return false;
+  const now = snapshot();
+  return now?.trackId === trackId && now.status !== "playing" && now.status !== "buffering";
 }
 
 /**
@@ -327,7 +346,10 @@ export async function waitUntilOn(
     // 0 — звук ещё не грузился (после setContext плеер ждёт play): старого трека,
     // которому могли бы достаться указания, тоже нет.
     const shown = now?.durationMs ?? 0;
-    const durationMatches = durationMs <= 0 || shown === 0 || Math.abs(shown - durationMs) < 1500;
+    // Стоит на треке после своего setContext: прежний звук молчит, а запустит
+    // трек play(), который загрузит уже его.
+    const durationMatches =
+      durationMs <= 0 || shown === 0 || Math.abs(shown - durationMs) < 1500 || awaitingFreshAudio(trackId);
     if (now?.trackId === trackId && now.status !== "loadingMediaSource" && durationMatches) return true;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
@@ -338,9 +360,24 @@ export async function play() {
   const p = player();
   if (!p) return;
   const status = String(p.getState().playerState.status.value);
+  const now = snapshot();
+  const fresh = !!now?.trackId && awaitingFreshAudio(now.trackId);
   // После setContext плеер стоит, а не на паузе: resume тогда ничего не делает.
-  if (status === "stopped" || status === "ended" || status === "idle") await asMod(() => p.play());
+  // А на паузе после setContext resume продолжил бы прежний трек (см. staleAudio).
+  if (fresh || status === "stopped" || status === "ended" || status === "idle") await asMod(() => p.play());
   else await asMod(() => p.resume());
+  if (!fresh) {
+    staleAudio = null;
+    return;
+  }
+  const pending = staleAudio?.pendingSeekMs ?? null;
+  const trackId = staleAudio?.trackId ?? "";
+  const expected = Number(p.getState().queueState.currentEntity.value?.entity?.data?.meta?.durationMs ?? 0);
+  staleAudio = null;
+  if (pending !== null && pending > 0) {
+    // Перемотка, которую ядро дало, пока звука трека ещё не было: теперь — к нему.
+    if (await waitUntilOn(trackId, expected, 3000)) await asMod(() => p.setProgress(pending / 1000));
+  }
 }
 
 export async function pause() {
@@ -350,7 +387,14 @@ export async function pause() {
 
 export async function seek(ms: number) {
   const p = player();
-  if (p) await asMod(() => p.setProgress(Math.max(0, ms) / 1000));
+  if (!p) return;
+  const now = snapshot();
+  // Звук ещё прежнего трека: перемотать его — значит сдвинуть не тот трек.
+  if (now?.trackId && staleAudio && awaitingFreshAudio(now.trackId)) {
+    staleAudio.pendingSeekMs = Math.max(0, ms);
+    return;
+  }
+  await asMod(() => p.setProgress(Math.max(0, ms) / 1000));
 }
 
 /**

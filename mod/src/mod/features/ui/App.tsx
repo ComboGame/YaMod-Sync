@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { Toaster } from "@ui/components/ui/sonner";
+import { onUpdate } from "@ui/hooks/use-update";
 import { SyncDot, syncState } from "@ui/components/sync/now-playing";
 import { useSync } from "@ui/hooks/use-sync";
 import { ShadowPortal } from "@ui/lib/shadow";
@@ -135,8 +137,30 @@ function useRoomMarks() {
   useEffect(() => markRoom({ inRoom, guestOf, label }), [inRoom, guestOf, label]);
 }
 
+/** О новой версии — один раз за версию, тостом: и в оформлении клиента, где верхней панели нет. */
+function useUpdateToast() {
+  useEffect(
+    () =>
+      onUpdate((update) => {
+        if (update?.status !== "available" || !update.version) return;
+        const version = update.version;
+        void window.yandexMusicMod.getStorageValue("update/notified").then((seen) => {
+          if (seen === version) return;
+          window.yandexMusicMod.setStorageValue("update/notified", version);
+          toast(`Вышла версия ${version}`, {
+            description: "Обновить можно в настройках мода, в разделе «Обновления».",
+            action: { label: "Открыть", onClick: () => openSettings("updates") },
+            duration: 12_000,
+          });
+        });
+      }),
+    [],
+  );
+}
+
 export default function App() {
   useRoomMarks();
+  useUpdateToast();
   const shell = useShell();
   const slot = useNavbarSlot();
   const wide = useWideWindow();
