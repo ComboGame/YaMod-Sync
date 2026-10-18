@@ -46,8 +46,31 @@ pub struct YandexMusic {
 }
 
 /// The platform TLS stack (schannel on Windows) needs no help.
+#[cfg(not(feature = "tls-rustls"))]
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+}
+
+/// Trusts the bundled webpki roots rather than the platform verifier.
+///
+/// `reqwest`'s rustls support would otherwise reach for
+/// `rustls-platform-verifier`, which on Android has to be handed a JVM before its
+/// first use. A fixed root set is one less moving part across the JNI boundary.
+/// The provider is named explicitly so this does not depend on whether
+/// [`crate::install_tls_provider`] ran first.
+#[cfg(feature = "tls-rustls")]
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let config =
+        rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+    reqwest::Client::builder().use_preconfigured_tls(config)
 }
 
 impl YandexMusic {

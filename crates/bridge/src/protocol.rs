@@ -5,7 +5,7 @@
 //! snapshot, and instructions for the app's player.
 
 use serde::{Deserialize, Serialize};
-use ymsync_proto::{RepeatMode, TrackRef};
+use ymsync_proto::TrackRef;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -62,48 +62,8 @@ fn default_host_port() -> u16 {
 }
 
 /// A command for the room, from the mod's panel or from the app's own controls.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "c", rename_all = "snake_case")]
-pub enum UiCommand {
-    Toggle,
-    Next,
-    Prev,
-    Seek { ms: u64 },
-    Index { index: usize },
-    SetQueue { tracks: Vec<TrackRef>, start: usize },
-    Enqueue { tracks: Vec<TrackRef> },
-    PlayNext { tracks: Vec<TrackRef> },
-    /// «Моя волна» or a preset for the whole room, fed from this account. The
-    /// seeds are the app's own: none for plain «Моя волна», `genre:rnb`,
-    /// `artist:5839186` and so on for a preset.
-    Wave {
-        #[serde(default)]
-        seeds: Vec<String>,
-        /// A new session even for the wave already playing: «Встряхнуть».
-        #[serde(default)]
-        fresh: bool,
-    },
-    /// The heart or «не нравится» on a track, for the wave this peer feeds.
-    WaveFeedback { kind: FeedbackKind, track_id: String },
-    StopWave,
-    /// Passes the wave to the listener with this relay id.
-    HandWave { to: u64 },
-    /// Makes the listener with this relay id the room's admin.
-    SetAdmin { peer: u64 },
-    Repeat { mode: RepeatMode },
-    Shuffle { on: bool },
-    Name { name: String },
-    Like { track: TrackRef, liked: bool },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FeedbackKind {
-    Like,
-    Unlike,
-    Dislike,
-    Undislike,
-}
+/// Shared with every front end; see [`ymsync::ui`].
+pub use ymsync::ui::{FeedbackKind, UiCommand};
 
 /// What the app's player is doing.
 #[derive(Debug, Clone, PartialEq, Deserialize)]

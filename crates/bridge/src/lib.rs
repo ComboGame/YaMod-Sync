@@ -23,10 +23,10 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 use ymsync::api::YandexMusic;
 use ymsync::config::{CacheConfig, Config, HostConfig, ShareConfig};
-use ymsync::engine::{Command, Snapshot, WaveFeedbackKind};
+use ymsync::engine::{Command, Snapshot};
 use ymsync::session;
 
-use crate::protocol::{FeedbackKind, Input, Output, SessionState, StartConfig, UiCommand};
+use crate::protocol::{Input, Output, SessionState, StartConfig};
 use crate::remote::RemotePlayback;
 
 /// Snapshots change on every engine tick, mostly because the playhead moved. The
@@ -126,36 +126,8 @@ async fn write_lines<W: AsyncWrite + Unpin>(mut rx: mpsc::UnboundedReceiver<Outp
     }
 }
 
-/// The mod's command, as the engine knows it.
-pub fn engine_command(command: UiCommand) -> Command {
-    match command {
-        UiCommand::Toggle => Command::TogglePause,
-        UiCommand::Next => Command::Next,
-        UiCommand::Prev => Command::Prev,
-        UiCommand::Seek { ms } => Command::SeekTo(ms),
-        UiCommand::Index { index } => Command::PlayIndex(index),
-        UiCommand::SetQueue { tracks, start } => Command::SetQueue { tracks, start },
-        UiCommand::Enqueue { tracks } => Command::Enqueue { tracks },
-        UiCommand::PlayNext { tracks } => Command::PlayNext { tracks },
-        UiCommand::Wave { seeds, fresh } => Command::PlayWave { seeds, fresh },
-        UiCommand::WaveFeedback { kind, track_id } => Command::WaveFeedback {
-            track_id,
-            kind: match kind {
-                FeedbackKind::Like => WaveFeedbackKind::Like,
-                FeedbackKind::Unlike => WaveFeedbackKind::Unlike,
-                FeedbackKind::Dislike => WaveFeedbackKind::Dislike,
-                FeedbackKind::Undislike => WaveFeedbackKind::Undislike,
-            },
-        },
-        UiCommand::StopWave => Command::StopStation,
-        UiCommand::HandWave { to } => Command::HandWave { to },
-        UiCommand::SetAdmin { peer } => Command::SetAdmin { peer },
-        UiCommand::Repeat { mode } => Command::SetRepeat(mode),
-        UiCommand::Shuffle { on } => Command::SetShuffle(on),
-        UiCommand::Name { name } => Command::SetName(name),
-        UiCommand::Like { track, liked } => Command::Like { track, liked },
-    }
-}
+/// The mod's command, as the engine knows it. Shared with every front end.
+pub use ymsync::ui::engine_command;
 
 /// The core's configuration for one session.
 pub fn core_config(start: &StartConfig) -> Config {

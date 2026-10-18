@@ -9,8 +9,20 @@ publish.workspace = true
 [features]
 default = ["tls-native"]
 
+# The core's own audio output (`player`): `rodio` → `cpal`. Off for the bridge,
+# where the Yandex Music app plays; on for the phone, where AAudio does.
+audio-rodio = ["dep:rodio"]
+
 # TLS through the platform stack: schannel on Windows.
 tls-native = ["reqwest/native-tls", "tokio-tungstenite/native-tls"]
+# TLS in Rust, for Android, which has no platform stack to link against: rustls
+# with the ring provider and the bundled webpki roots.
+tls-rustls = [
+    "reqwest/rustls-no-provider",
+    "tokio-tungstenite/rustls-tls-webpki-roots",
+    "dep:rustls",
+    "dep:webpki-roots",
+]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -30,6 +42,9 @@ quick-xml = { version = "0.41.0", features = ["serialize"] }
 # `form` is for the two «Мне нравится» endpoints: they are the only writes this
 # app makes, and Yandex takes them as a urlencoded form rather than as JSON.
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "charset", "system-proxy", "query", "form"] }
+rodio = { version = "0.21.1", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 # `rc` so a snapshot can carry its cached-track list behind an `Arc`: the list
 # runs into the thousands and is cloned into every snapshot, several times a
 # second.
