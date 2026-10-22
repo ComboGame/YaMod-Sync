@@ -216,7 +216,10 @@ Android (`android/`, `crates/android/`; план — `docs/superpowers/plans/202
 
 - Патчер (`patcher.ts`) ищет в `index.js` точные строки: `UPDATE_POLL_INTERVAL_MS:`, `REFRESH_EVENT_TRIGGER_TIME_MS:`,
   `PRODUCT_NAME_LOCALIZED:`, `    updater.start();`, `minWidth: 768`, `minHeight: 650`, `titleBarStyle: "hidden",`.
-  Несовпадение = падение сборки (так задумано).
+  Несовпадение = падение сборки (так задумано). В одном чанке `_next/static/chunks` — кривая громкости Sonata
+  (`Math.pow(.01,1-x)` и обратная `Math.log(.01)`) → `.001`: 60 дБ вместо 40, иначе на 1% громко.
+- Процент громкости — `ui/volume-percent.ts`: `data-ymsync-volume` на `ChangeVolume_sliderContainer`, рисует `::before`.
+  У `PLAYERBAR_DESKTOP` в теме нет `overflow: hidden`: всплывающий ползунок отсчитывается от этой section.
 - Electron зафиксирован 38.2.2 (как у клиента 5.122 и 5.123). В asar есть приватный `@yandex-music-int/...` — не ставить
   зависимости клиента через npm, node_modules берутся из asar.
 - Фасад плеера Sonata (`sonata.ts::player`): объект в `memoizedState` хука с `playbackController`, `setContext`,

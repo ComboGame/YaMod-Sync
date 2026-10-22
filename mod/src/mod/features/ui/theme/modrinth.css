@@ -351,15 +351,20 @@ html.ymsync-theme [class*="NavbarDesktopUserWidget_userProfile__"] [class*="User
 
 /* ---- плеер внизу --------------------------------------------------------- */
 
-/* Плеер — карточка под контентом, как строка «Недавнее» у Modrinth. */
+/*
+ * Плеер — карточка под контентом, как строка «Недавнее» у Modrinth. Без
+ * overflow: hidden — ползунок громкости всплывает над плеером и отсчитывается
+ * от этой section; углы фона и прогресса обрезает их собственное скругление,
+ * подогнанное под рамку.
+ */
 html.ymsync-theme section[data-test-id="PLAYERBAR_DESKTOP"] {
+  --ym-radius-size-l: calc(var(--ms-radius-lg) - 1px);
   width: auto !important;
   min-width: 0;
   margin: 0.5rem 0.75rem 0.75rem 0.75rem;
   border-radius: var(--ms-radius-lg);
   border: 1px solid var(--ms-border);
   background: var(--ms-surface-2-5);
-  overflow: hidden;
 }
 html.ymsync-theme [class*="PlayerBarDesktopWithBackgroundProgressBar_playerBar__"] {
   background: transparent;

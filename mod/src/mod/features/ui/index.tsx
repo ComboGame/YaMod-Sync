@@ -5,12 +5,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App.tsx";
 import { applyClientTweaks } from "./client-tweaks";
 import { applyTheme } from "./theme";
+import { showVolumePercent } from "./volume-percent";
 import { attachModShadow, PortalContainerProvider } from "./lib/shadow";
 
 const queryClient = new QueryClient();
 
 document.addEventListener("DOMContentLoaded", () => {
   applyClientTweaks();
+  showVolumePercent();
   // Оформление по умолчанию — сразу, до первой отрисовки, чтобы не мелькал
   // прежний вид; сохранённый выбор App прочитает следом.
   applyTheme(true);

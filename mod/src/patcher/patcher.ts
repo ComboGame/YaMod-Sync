@@ -175,6 +175,30 @@ export async function processBuild(build: AppBuild, options: ProcessOptions) {
   fs.writeFileSync(files.indexJs, indexJs);
   log(`✔️   index.js`);
 
+  // Громкость: Sonata переводит положение ползунка x в усиление 0.01^(1-x), это
+  // всего 40 дБ, и на 1% ещё громко. С 0.001 диапазон 60 дБ: 1% ≈ −59 дБ.
+  // Обратная формула (положение по усилению) — рядом, в состоянии плеера.
+  const chunksDir = path.join(buildModdedDir, "app", "_next", "static", "chunks");
+  const volumeCurve = /Math\.pow\(\.01,1-(\w+)\);return (\w+)>\.01\?\2:0/g;
+  const volumeChunks = (fs.readdirSync(chunksDir, { recursive: true }) as string[])
+    .filter((file) => file.endsWith(".js"))
+    .filter((file) => fs.readFileSync(path.join(chunksDir, file), "utf8").search(volumeCurve) !== -1);
+  if (volumeChunks.length !== 1) {
+    throw new Error(`кривая громкости: ожидался 1 файл в _next/static/chunks, найдено ${volumeChunks.length}`);
+  }
+  const volumeFile = path.join(chunksDir, volumeChunks[0]!);
+  let volumeJs = fs.readFileSync(volumeFile, "utf8");
+  volumeJs = patch(volumeJs, volumeChunks[0]!, "кривая громкости", volumeCurve, "Math.pow(.001,1-$1);return $2>.001?$2:0");
+  volumeJs = patch(
+    volumeJs,
+    volumeChunks[0]!,
+    "положение ползунка громкости",
+    "Math.log(Math.max(this.volume.value,.01))/Math.log(.01)",
+    "Math.log(Math.max(this.volume.value,.001))/Math.log(.001)",
+  );
+  fs.writeFileSync(volumeFile, volumeJs);
+  log(`✔️   громкость до −60 дБ`);
+
   const splashScreenPath = path.join(buildModdedDir, "app", "media", "splash_screen");
   if (fs.existsSync(splashScreenPath)) {
     fs.rmSync(splashScreenPath, { recursive: true, force: true });
